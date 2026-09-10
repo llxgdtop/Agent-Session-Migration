@@ -1,0 +1,2 @@
+{"type":"user","cwd":"/tmp/proj-alpha","sessionId":"aaa00000-0000-4000-8000-0000000000aa","uuid":"u-0001","parentUuid":null,"timestamp":"2026-09-10T10:00:00.000Z","message":{"role":"user","content":"第一个问题:你好,帮我看一下这个项目"}}
+{"type":"assistant","cwd":"/tmp/proj-alpha","sessionId":"aaa00000-0000-4000-8000-0000000000aa","uuid":"u-0002","parentUuid":"u-0001","timestamp":"2026-09-10T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"好的,这是回答。"}]}}
