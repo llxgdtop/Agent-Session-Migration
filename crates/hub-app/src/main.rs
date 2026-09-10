@@ -266,37 +266,57 @@ impl HubApp {
     }
 }
 
-/// best-effort CJK 字体:仅扫描 $HOME 内的字体目录(macOS:~/Library/Fonts;Linux:~/.fonts)。
+/// best-effort CJK 字体:依次扫描 $HOME 字体目录与 macOS 系统字体目录(只读)。
 ///
-/// egui 内置字体不含 CJK,若 $HOME 无可用字体,中文将显示为方框(已知限制,见 README);
-/// 读取 $HOME 之外的系统字体路径属自治边界 #9,待 owner 决策。
+/// egui 内置字体不含 CJK。候选目录优先级:~/Library/Fonts、~/.fonts,
+/// 然后 macOS /System/Library/Fonts(代码审查决策 2026-09-11:自治边界 #9 的本条例外,
+/// 只读系统字体属桌面应用惯例,否则中文界面显示为方框、M1 无法人工验收);
+/// 系统目录内优先取 PingFang(苹方),避免先命中纯拉丁字体。
 fn install_home_fonts(ctx: &egui::Context) {
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
     let home = PathBuf::from(home);
-    let candidate_dirs = [home.join("Library/Fonts"), home.join(".fonts")];
+    let mut candidate_dirs = vec![home.join("Library/Fonts"), home.join(".fonts")];
+    #[cfg(target_os = "macos")]
+    candidate_dirs.push(PathBuf::from("/System/Library/Fonts"));
 
     let mut fonts = egui::FontDefinitions::default();
     'outer: for dir in candidate_dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_font = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| matches!(e, "ttf" | "ttc" | "otf"))
-                .unwrap_or(false);
-            if !is_font {
-                continue;
-            }
+        // 先 PingFang 命名优先,再按名序;t(tee)tf 优先于 ttc(单一字体文件兼容性更稳)
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| matches!(e, "ttf" | "ttc" | "otf"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        paths.sort_by_key(|p| {
+            let name = p
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase();
+            let pingfang_first = if name.contains("pingfang") { 0 } else { 1 };
+            let ttf_first = if p.extension().and_then(|e| e.to_str()) == Some("ttf") {
+                0
+            } else {
+                1
+            };
+            (pingfang_first, ttf_first, name)
+        });
+        for path in paths {
             let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
             let name = format!(
-                "home-font-{}",
+                "hub-font-{}",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
             fonts

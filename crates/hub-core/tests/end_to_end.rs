@@ -171,14 +171,10 @@ fn is_uuid_v4(s: &str) -> bool {
         && matches!(b[19], b'8' | b'9' | b'a' | b'b')
 }
 
-fn is_digit(b: u8) -> bool {
-    b.is_ascii_digit()
-}
-
 /// 路径前缀 `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`
 fn normalize_path_prefix(path: &str) -> String {
     let b = path.as_bytes();
-    let shape = |i: usize, n: usize| b[i..i + n].iter().all(|c| is_digit(*c));
+    let shape = |i: usize, n: usize| b[i..i + n].iter().all(|c| c.is_ascii_digit());
     if b.len() > 11
         && shape(0, 4)
         && b[4] == b'/'
