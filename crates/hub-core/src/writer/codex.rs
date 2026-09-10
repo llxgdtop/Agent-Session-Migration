@@ -112,7 +112,8 @@ pub fn write_session_with(
         return Err(HubError::Io(e));
     }
 
-    let resume_command = format!("cd {} && codex resume {session_id}", ir.summary.project_dir);
+    let resume_command =
+        crate::launcher::codex_resume_command(&session_id, &ir.summary.project_dir);
     Ok(CodexWriteOutput {
         session_id,
         file_path: target,
