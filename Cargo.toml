@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hub-core"]
+members = ["crates/hub-core", "crates/hub-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,3 +12,5 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 tempfile = "3"
+egui = "0.36"
+eframe = "0.36"

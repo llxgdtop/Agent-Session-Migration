@@ -1,0 +1,9 @@
+[package]
+name = "hub-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hub-core = { path = "../hub-core" }
+egui.workspace = true
+eframe.workspace = true
