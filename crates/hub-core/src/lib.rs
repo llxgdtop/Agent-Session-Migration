@@ -5,8 +5,10 @@
 
 pub mod error;
 pub mod ir;
+pub mod mapper;
 pub mod reader;
 
 pub use error::HubError;
 pub use ir::{Role, SessionSummary, Tool, UnifiedMessage, UnifiedPart, UnifiedSession};
+pub use mapper::{map_session, CodexEvent};
 pub use reader::claude::{read_session, scan_sessions};
