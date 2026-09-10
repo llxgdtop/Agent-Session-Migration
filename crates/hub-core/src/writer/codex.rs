@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(out.session_id, FIXED_UUID);
         assert_eq!(
             out.resume_command,
-            format!("cd /tmp/proj && codex resume {FIXED_UUID}")
+            format!("cd '/tmp/proj' && codex resume {FIXED_UUID}")
         );
 
         let content = fs::read_to_string(&out.file_path).unwrap();
