@@ -1,0 +1,5 @@
+{"timestamp":"2026-09-11T00:00:00.000Z","type":"session_meta","payload":{"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-09-11T00:00:00.000Z","cwd":"/tmp/proj-alpha","originator":"codex-tui","cli_version":"0.146.0","source":"cli","thread_source":"user","model_provider":"openai"}}
+{"timestamp":"2026-09-11T00:00:00.000Z","type":"turn_context","payload":{"cwd":"/tmp/proj-alpha","model":"gpt-5","approval_policy":"on-request","summary":"第一个问题:你好,帮我看一下这个项目"}}
+{"timestamp":"2026-09-10T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"第一个问题:你好,帮我看一下这个项目"}]}}
+{"timestamp":"2026-09-10T10:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"第一个问题:你好,帮我看一下这个项目"}}
+{"timestamp":"2026-09-10T10:00:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"好的,这是回答。"}]}}
