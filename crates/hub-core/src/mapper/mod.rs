@@ -1,9 +1,9 @@
-//! IR → Codex rollout 事件映射(契约见 MVP-DEVELOPMENT.md §2.1,合并规则见 §3.2)。
+//! IR → Codex rollout 事件映射。
 
 use crate::error::HubError;
 use crate::ir::{Role, UnifiedPart, UnifiedSession};
 
-/// 与目标 rollout JSONL 行一一对应的中间事件(§2.1)。
+/// 与目标 rollout JSONL 行一一对应的中间事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexEvent {
     SessionMeta {
@@ -26,19 +26,19 @@ pub enum CodexEvent {
     },
 }
 
-/// BR-15:按 Unicode 标量(char)截断的阈值。
+/// 按 Unicode 标量(char)截断的阈值。
 const REASONING_MAX_CHARS: usize = 1000;
 const TOOL_INPUT_MAX_CHARS: usize = 500;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 const ELLIPSIS: &str = "…";
 
-/// IR → 事件序列(§2.1)。
+/// IR → 事件序列。
 ///
 /// - session_id 与 meta_timestamp 由调用方(write_session_with 从 IdGen 取得)传入,
-///   保证文件名 uuid == session_meta.id(§3.3);
-/// - 空 parts 消息与合并后文本为空的消息丢弃(BR-21);全部被丢弃时报 EmptySession(BR-11);
+///   保证文件名 uuid == session_meta.id;
+/// - 空 parts 消息与合并后文本为空的消息丢弃;全部被丢弃时报 EmptySession;
 /// - user 消息的 response_item 与 user_message event 恰好成对产出,writer 不派生任何事件;
-/// - 消息 timestamp 缺失时用 meta_timestamp 兜底(BR-20:缺失时用写入时刻)。
+/// - 消息 timestamp 缺失时用 meta_timestamp 兜底。
 pub fn map_session(
     ir: &UnifiedSession,
     session_id: &str,
@@ -65,11 +65,11 @@ pub fn map_session(
     let mut emitted = 0usize;
     for message in &ir.messages {
         if message.parts.is_empty() {
-            continue; // BR-21
+            continue; //
         }
         let text = render_parts(&message.parts);
         if text.is_empty() {
-            continue; // BR-21:合并后为空同样丢弃
+            continue; // 合并后为空同样丢弃
         }
         let timestamp = message
             .timestamp
@@ -90,15 +90,15 @@ pub fn map_session(
     }
 
     if emitted == 0 {
-        return Err(empty_session()); // BR-11/BR-21 极端:map 后无任何消息事件
+        return Err(empty_session()); // /极端:map 后无任何消息事件
     }
     Ok(events)
 }
 
-/// 按 §3.2 把同一消息的 parts 顺序拼接为单一文本:
+/// 按 把同一消息的 parts 顺序拼接为单一文本:
 /// thinking → "> 内部推理:<t>\n\n"、text → 原文、
 /// tool_use → "[调用工具 <name>] <input_json>"、tool_result → "[工具结果 <tool> isError=<b>] <content>"。
-/// 截断阈值(BR-15):reasoning 1000 / tool input 500 / tool result 2000 char,追加 "…"。
+/// 截断阈值:reasoning 1000 / tool input 500 / tool result 2000 char,追加 "…"。
 fn render_parts(parts: &[UnifiedPart]) -> String {
     let mut out = String::new();
     for part in parts {
@@ -130,7 +130,7 @@ fn render_parts(parts: &[UnifiedPart]) -> String {
     out
 }
 
-/// 按 char 截断;超长时追加省略号(BR-15)。
+/// 按 char 截断;超长时追加省略号。
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() > max {
         let mut cut: String = text.chars().take(max).collect();
@@ -305,7 +305,7 @@ mod tests {
             Err(HubError::EmptySession(_))
         ));
 
-        // 极端:消息存在但全部为空 parts(或合并后为空)同样拒绝(§2.2)
+        // 极端:消息存在但全部为空 parts(或合并后为空)同样拒绝
         let ir_all_empty = ir_with(vec![
             msg(Role::Assistant, vec![]),
             msg(Role::User, vec![UnifiedPart::Text(String::new())]),
@@ -397,7 +397,7 @@ mod tests {
         assert!(body.ends_with('…'));
     }
 
-    /// BR-20:消息 timestamp 缺失时以 meta_timestamp 兜底。
+    /// 消息 timestamp 缺失时以 meta_timestamp 兜底。
     #[test]
     fn tc_map_07_missing_timestamp_falls_back_to_meta() {
         let ir = ir_with(vec![UnifiedMessage {

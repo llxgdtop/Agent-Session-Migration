@@ -1,7 +1,7 @@
-//! Claude Code 会话 JSONL 解析(契约见 MVP-DEVELOPMENT.md §2.1,映射规则见 §3.2)。
+//! Claude Code 会话 JSONL 解析。
 //!
 //! 源形态:`~/.claude/projects/<proj-dir>/<sessionId>.jsonl`,逐行 JSON 事件流。
-//! 坏行跳过并计数(BR-10);sidechain 行跳过(BR-17);system 等其他 type 忽略。
+//! 坏行跳过并计数;sidechain 行跳过;system 等其他 type 忽略。
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,14 +13,14 @@ use serde_json::Value;
 use crate::error::HubError;
 use crate::ir::{Role, SessionSummary, UnifiedMessage, UnifiedPart, UnifiedSession};
 
-/// 标题截断长度(BR-16:首条 user 文本前 50 个 char)。
+/// 标题截断长度。
 const TITLE_MAX_CHARS: usize = 50;
 
-/// 扫描 root(通常 ~/.claude/projects)下所有 *.jsonl,按 last_active 倒序(BR-2/BR-18),
+/// 扫描 root(通常 ~/.claude/projects)下所有 *.jsonl,按 last_active 倒序,
 /// 同刻 tie-break 按 session_id 字典序。
 ///
 /// 单个文件读取失败(含空会话)时跳过该文件,不影响整体扫描;
-/// root 本身不存在时报 SourceNotFound(§2.2)。
+/// root 本身不存在时报 SourceNotFound。
 pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     if !root.is_dir() {
         return Err(HubError::SourceNotFound(root.to_path_buf()));
@@ -41,8 +41,8 @@ pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     Ok(summaries)
 }
 
-/// 解析单个会话文件为 IR。坏行跳过并计数(BR-10);sidechain 跳过(BR-17);
-/// 无任何 user/assistant 消息时报 EmptySession(BR-11)。
+/// 解析单个会话文件为 IR。坏行跳过并计数;sidechain 跳过;
+/// 无任何 user/assistant 消息时报 EmptySession。
 pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     if !path.is_file() {
         return Err(HubError::SourceNotFound(path.to_path_buf()));
@@ -68,11 +68,11 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
                 continue;
             }
         };
-        // BR-17:sidechain 行跳过(不计 warning、不计消息、不计 last_active)
+        // sidechain 行跳过(不计 warning、不计消息、不计 last_active)
         if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        // BR-19:project_dir 一律取首个非空行内 cwd
+        // project_dir 一律取首个非空行内 cwd
         if project_dir.is_empty() {
             if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
                 if !cwd.is_empty() {
@@ -93,7 +93,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
             Some(Value::String(s)) => vec![UnifiedPart::Text(s.clone())],
             Some(Value::Array(blocks)) => parse_blocks(blocks, &mut tool_names),
             _ => {
-                // user/assistant 行但 message.content 形态无法解读:按坏行计(BR-10)
+                // user/assistant 行但 message.content 形态无法解读:按坏行计
                 parse_warnings += 1;
                 continue;
             }
@@ -112,7 +112,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
         return Err(HubError::EmptySession(path.to_path_buf()));
     }
 
-    // BR-18:最后一条 user/assistant 行 timestamp;缺失 fallback 文件 mtime(RFC3339)
+    // 最后一条 user/assistant 行 timestamp;缺失 fallback 文件 mtime(RFC3339)
     let last_active = match last_active_line_ts {
         Some(ts) => ts,
         None => mtime_rfc3339(path)?,
@@ -136,7 +136,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     })
 }
 
-/// 逐块解析 content 数组(§3.2)。未知块类型忽略。
+/// 逐块解析 content 数组。未知块类型忽略。
 fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> Vec<UnifiedPart> {
     let mut parts = Vec::new();
     for block in blocks {
@@ -148,7 +148,7 @@ fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> V
                     .unwrap_or_default()
                     .to_string(),
             )),
-            // BR-4:thinking 明文保留为 Reasoning,signature 不进入 IR
+            // thinking 明文保留为 Reasoning,signature 不进入 IR
             Some("thinking") => parts.push(UnifiedPart::Reasoning(
                 block
                     .get("thinking")
@@ -209,7 +209,7 @@ fn extract_result_content(content: Option<&Value>) -> String {
     }
 }
 
-/// BR-16:首条 user 文本前 50 个 char(不足全取);无 user 文本用 "untitled"。
+/// 首条 user 文本前 50 个 char(不足全取);无 user 文本用 "untitled"。
 fn title_of(messages: &[UnifiedMessage]) -> String {
     for message in messages {
         if message.role != Role::User {
@@ -306,18 +306,18 @@ mod tests {
             session.messages[1].parts,
             vec![UnifiedPart::Text("好的,这是回答。".to_string())]
         );
-        // BR-16:标题 = 首条 user 文本(18 char < 50,全取)
+        // 标题 = 首条 user 文本(18 char < 50,全取)
         assert_eq!(session.summary.title, "第一个问题:你好,帮我看一下这个项目");
-        // BR-19:project_dir = 行内 cwd
+        // project_dir = 行内 cwd
         assert_eq!(session.summary.project_dir, "/tmp/proj-alpha");
-        // BR-18:最后一条 user/assistant 行 timestamp
+        // 最后一条 user/assistant 行 timestamp
         assert_eq!(session.summary.last_active, "2026-09-10T10:00:05.000Z");
         assert_eq!(session.summary.message_count, 2);
         assert_eq!(session.summary.session_id, "minimal");
         assert_eq!(session.summary.source_path, fixture("minimal.jsonl"));
     }
 
-    // ---------- TC-READ-01(标题 50 char 截断,BR-16)----------
+    // ---------- TC-READ-01(标题 50 char 截断)----------
     #[test]
     fn tc_read_01_title_truncated_to_50_chars() {
         let dir = tempfile::tempdir().unwrap();
@@ -365,7 +365,7 @@ mod tests {
             }]
         );
 
-        // BR-4:signature 不进入 IR(任何形式都不可见)
+        // signature 不进入 IR(任何形式都不可见)
         let serialized = serde_json::to_string(&session).unwrap();
         assert!(!serialized.contains("sig-should-not-appear"));
     }

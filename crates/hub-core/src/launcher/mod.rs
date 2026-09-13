@@ -1,9 +1,8 @@
-//! Launcher 层:目标工具 resume 命令生成。MVP 仅实现 Codex。
+//! Launcher 层:目标工具 resume 命令生成。当前支持 Codex。
 
-/// BR-8/BR-14:迁移成功后交付的命令。
+/// /:迁移成功后交付的命令。
 ///
 /// `cd '<project_dir>' && codex resume <session_id>`
-/// (交互式形态;M1 验收时由 owner 人工复验,不可用则回退 `codex exec resume`,见 BR-14。)
 ///
 /// 安全(代码审查修复):project_dir 来自源会话文件的 cwd 字段(外部可控文本),
 /// 而本命令会被用户复制到终端执行,不得裸拼。规则:不含单引号时以单引号包裹

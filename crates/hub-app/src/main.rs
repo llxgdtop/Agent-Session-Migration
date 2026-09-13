@@ -1,8 +1,8 @@
-//! Agent Session Hub — egui 壳(hub-app)。
+//! Agent Session Hub 桌面应用。
 //!
-//! MVP 形态(§6 ⑦):左侧 Claude 会话列表(scan_sessions)、右侧角色消息流预览、
-//! "迁移到 Codex" 按钮(write_session)、成功后显示可复制的 resume 命令与 parse_warnings 提示。
-//! 简洁可用即可,不追求视觉(BR-2/8/13)。
+//! 界面:左侧为 Claude Code 会话列表(自动扫描,按最近活跃排序),
+//! 右侧为所选会话的消息流预览;点击"迁移到 Codex"完成转换,
+//! 并给出可直接复制到终端的续聊命令。
 
 use std::path::PathBuf;
 
@@ -160,7 +160,7 @@ impl eframe::App for HubApp {
 impl HubApp {
     fn show_detail(&mut self, ui: &mut egui::Ui) {
         let Some(index) = self.selected else {
-            ui.label("在左侧选择一个会话以预览(BR-2)");
+            ui.label("在左侧选择一个会话以预览");
             return;
         };
         let Some(summary) = self.summaries.get(index) else {
@@ -180,7 +180,7 @@ impl HubApp {
             return;
         };
 
-        // BR-10:坏行提示
+        // 坏行提示
         if session.parse_warnings > 0 {
             ui.colored_label(
                 egui::Color32::YELLOW,
@@ -191,18 +191,18 @@ impl HubApp {
             );
         }
 
-        // 迁移按钮(BR-11:空会话禁用)
+        // 迁移按钮
         let can_migrate = session.messages.iter().any(|m| !m.parts.is_empty());
         let response = ui.add_enabled(can_migrate, egui::Button::new("迁移到 Codex"));
         let response = if can_migrate {
             response
         } else {
-            response.on_disabled_hover_text("空会话,无可迁移消息(BR-11)")
+            response.on_disabled_hover_text("空会话,无可迁移消息")
         };
         let migrate_clicked = response.clicked();
         ui.separator();
 
-        // BR-13:M1 预览 = 仅角色消息流
+        // 预览:角色消息流
         egui::ScrollArea::vertical().show(ui, |ui| {
             for message in &session.messages {
                 let (role_name, color) = match message.role {
@@ -238,7 +238,7 @@ impl HubApp {
             self.do_migrate();
         }
 
-        // 迁移结果(BR-8/BR-14)
+        // 迁移结果
         match &self.migration {
             Some(Ok(ok)) => {
                 ui.separator();
@@ -266,75 +266,67 @@ impl HubApp {
     }
 }
 
-/// best-effort CJK 字体:依次扫描 $HOME 字体目录与 macOS 系统字体目录(只读)。
+/// 加载 CJK 回退字体(界面为中文,egui 内置字体不含 CJK)。
 ///
-/// egui 内置字体不含 CJK。候选目录优先级:~/Library/Fonts、~/.fonts,
-/// 然后 macOS /System/Library/Fonts(代码审查决策 2026-09-11:自治边界 #9 的本条例外,
-/// 只读系统字体属桌面应用惯例,否则中文界面显示为方框、M1 无法人工验收);
-/// 系统目录内优先取 PingFang(苹方),避免先命中纯拉丁字体。
+/// 策略:优先挂载"已知含简体中文"的系统字体(按优先级逐个尝试,读不到就下一个);
+/// 全部未命中时才退回扫描用户字体目录。不做目录扫描优先,是因为用户目录里
+/// 常见的是纯拉丁等宽字体(如 JetBrains Mono),先命中它会导致中文显示为方框。
 fn install_home_fonts(ctx: &egui::Context) {
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
-    };
-    let home = PathBuf::from(home);
-    let mut candidate_dirs = vec![home.join("Library/Fonts"), home.join(".fonts")];
-    #[cfg(target_os = "macos")]
-    candidate_dirs.push(PathBuf::from("/System/Library/Fonts"));
-
     let mut fonts = egui::FontDefinitions::default();
-    'outer: for dir in candidate_dirs {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        // 先 PingFang 命名优先,再按名序;t(tee)tf 优先于 ttc(单一字体文件兼容性更稳)
-        let mut paths: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
+
+    #[cfg(target_os = "macos")]
+    let known_cjk_fonts = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let known_cjk_fonts: [&str; 0] = [];
+
+    let mut fallback_scan_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        fallback_scan_dirs.extend([home.join("Library/Fonts"), home.join(".fonts")]);
+    }
+
+    // 已知白名单(按优先级)→ 用户目录扫描(按文件名序),取第一个能读到的
+    let mut candidates: Vec<PathBuf> = known_cjk_fonts.iter().map(PathBuf::from).collect();
+    for dir in &fallback_scan_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            candidates.extend(entries.flatten().map(|e| e.path()).filter(|p| {
                 p.extension()
                     .and_then(|e| e.to_str())
                     .map(|e| matches!(e, "ttf" | "ttc" | "otf"))
                     .unwrap_or(false)
-            })
-            .collect();
-        paths.sort_by_key(|p| {
-            let name = p
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_lowercase();
-            let pingfang_first = if name.contains("pingfang") { 0 } else { 1 };
-            let ttf_first = if p.extension().and_then(|e| e.to_str()) == Some("ttf") {
-                0
-            } else {
-                1
-            };
-            (pingfang_first, ttf_first, name)
-        });
-        for path in paths {
-            let Ok(bytes) = std::fs::read(&path) else {
-                continue;
-            };
-            let name = format!(
-                "hub-font-{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-            fonts
-                .font_data
-                .insert(name.clone(), egui::FontData::from_owned(bytes).into());
-            // 追加到家族末尾作为回退字体
-            fonts
-                .families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .push(name.clone());
-            fonts
-                .families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push(name.clone());
-            break 'outer; // 只需一个可用字体
+            }));
         }
+    }
+
+    for path in candidates {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let name = format!(
+            "hub-cjk-{}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        fonts
+            .font_data
+            .insert(name.clone(), egui::FontData::from_owned(bytes).into());
+        // 追加到家族末尾作为回退字体:拉丁字符仍用内置字体,缺字才落到 CJK 字体
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .push(name.clone());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .push(name.clone());
+        break;
     }
     ctx.set_fonts(fonts);
 }

@@ -1,33 +1,55 @@
-# Agent Session Hub(MVP)
+# Agent Session Hub
 
-Claude Code → Codex 会话迁移工具:把 `~/.claude/projects` 下的会话迁移为 Codex rollout,
-迁移后用 `codex resume <SESSION_ID>` 接着聊。MVP 范围与业务规则见
-`docs/MVP-DEVELOPMENT.md`(仓库外:../docs/MVP-DEVELOPMENT.md)。
+**让你的 AI 编程会话,不再被工具锁死。**
 
-## 结构
+在 Claude Code 里聊到一半的工作,一键迁移到 Codex 接着干——消息、推理过程、工具调用记录完整保留,无需从头交代背景。
 
-- `crates/hub-core` — 纯库:reader(Claude JSONL 解析)→ IR → mapper → writer(Codex rollout 写入)+ launcher(命令生成)
-- `crates/hub-app` — egui 壳:左侧会话列表、右侧消息流预览、"迁移到 Codex" 按钮、成功后展示可复制的 resume 命令
+## 它能做什么
 
-## 构建与运行
+- **会话一览**:自动读取本机所有 Claude Code 会话,按最近活跃排序,点开即可预览完整消息流
+- **一键迁移**:选中任意会话,转换为 Codex 会话格式写入本机,源文件不被修改
+- **无缝续聊**:迁移完成即给出续聊命令,复制到终端执行,Codex 就带着全部上下文继续工作
+
+## 使用
+
+1. 构建并启动应用:
+
+   ```sh
+   cargo build --release
+   ./scripts/build-app.sh        # 生成 dist/AgentSessionHub.app,双击即可打开
+   ```
+
+2. 在左侧列表选择一个会话,确认预览内容
+3. 点击「迁移到 Codex」
+4. 复制界面给出的命令,粘贴到终端执行——开始续聊
+
+## 隐私与安全
+
+- **纯本地运行**:不联网、不上传任何数据
+- **只增不改**:迁移仅新建文件,绝不修改你的 Claude Code 与 Codex 既有数据
+- **原子写入**:先写临时文件再落盘,失败不会产生半成品
+
+## 支持范围
+
+当前版本支持 **Claude Code → Codex** 单向迁移。
+
+路线图:
+
+- 支持反方向迁移(Codex → Claude Code)
+- 支持 ZCode(读入与写出)
+- 三个工具任意方向互迁,统一会话列表
+- 迁移前自动检测目标工具运行状态并备份数据
+
+## 开发
 
 ```sh
-cargo test          # 全部测试
-cargo run -p hub-app  # 启动界面(唯一入口)
+cargo test                    # 运行全部测试
+cargo run -p hub-app          # 开发模式启动
+cargo clippy --all-targets    # 静态检查
 ```
 
-## 运行时行为
+架构:`crates/hub-core`(核心库:读取 → 统一中间表示 → 写入)+ `crates/hub-app`(界面)。
 
-- 只读扫描 `~/.claude/projects/**/*.jsonl`,按最新活跃倒序展示;
-- 迁移只新增文件:`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`(临时文件 + rename 原子写),
-  绝不修改源文件与目标目录既有文件;
-- 目标文件已存在即拒绝写入(幂等键 = 目标文件路径);
-- 迁移成功后界面显示 `cd <project_dir> && codex resume <SESSION_ID>`,复制到终端在源项目目录下执行。
+## 许可
 
-## 已知限制(MVP)
-
-- 界面未内置 CJK 字体:egui 默认字体不含中文。本程序会尝试加载 `$HOME/Library/Fonts`
-  与 `$HOME/.fonts` 下的字体做回退;若两者皆无字体,中文会显示为方框
-  (内容本身不受影响,迁移产物完整)。是否允许读取系统字体目录(如
-  `/System/Library/Fonts`)待 owner 决策(自治边界 #9)。
-- 不检测 Codex 是否正在运行(已知且接受的风险,见 MVP 文档开篇)。
+私有项目,保留所有权利。

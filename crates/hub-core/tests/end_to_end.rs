@@ -1,6 +1,6 @@
 //! 端到端集成测试:read → write 全链路(TC-E2E-01/02)。
 //!
-//! 归一化规则见 MVP-DEVELOPMENT.md §7:
+//! 归一化规则见:
 //! uuid v4 → `<UUID>`;RFC3339 时间戳(两种格式)→ `<TS>`;`"cwd":"<任意>"` → `"cwd":"<CWD>"`;
 //! 路径前缀 `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`。固定 IdGen 消除其余不确定性。
 
@@ -52,7 +52,7 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let out = write_session_with(&ir, tmp.path(), &FixedIdGen).unwrap();
 
-    // 产物路径形态:<root>/<DATE>/rollout-<ts>-<uuid>.jsonl(§3.3)
+    // 产物路径形态:<root>/<DATE>/rollout-<ts>-<uuid>.jsonl
     let rel = out
         .file_path
         .strip_prefix(tmp.path())
@@ -64,7 +64,7 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
         format!("<DATE>/rollout-{FIXED_TS_FILE}-{FIXED_UUID}.jsonl")
     );
 
-    // BR-3:源文件迁移前后 SHA-256 不变
+    // 源文件迁移前后 SHA-256 不变
     let source_bytes_after = fs::read(&source).unwrap();
     let source_sha_after = hex(&sha256(&source_bytes_after));
     assert_eq!(
@@ -112,7 +112,7 @@ fn tc_e2e_02_rich_pipeline_succeeds_with_warnings() {
         assert!(DateTime::parse_from_rfc3339(ts).is_ok(), "RFC3339: {ts}");
     }
 
-    // 文本化工具内容确实进入产物(佐证 §3.2 映射生效)
+    // 文本化工具内容确实进入产物
     assert!(artifact.contains("[调用工具 Bash]"));
     assert!(artifact.contains("[工具结果 Bash isError=false]"));
     assert!(artifact.contains("> 内部推理:"));
@@ -120,7 +120,7 @@ fn tc_e2e_02_rich_pipeline_succeeds_with_warnings() {
     assert!(!artifact.contains("sidechain 分支消息"));
 }
 
-// ---------- 归一化(§7 规则) ----------
+// ---------- 归一化 ----------
 
 fn normalized_lines(content: &str) -> Vec<Value> {
     content
@@ -300,7 +300,7 @@ fn sha256_known_vectors() {
     );
 }
 
-/// 归一化规则单元自检(§7)。
+/// 归一化规则单元自检。
 #[test]
 fn normalization_helpers() {
     assert!(is_uuid_v4(FIXED_UUID));

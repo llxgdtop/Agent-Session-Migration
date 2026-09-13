@@ -1,7 +1,7 @@
-//! Codex rollout 写入(契约见 MVP-DEVELOPMENT.md §2.1,schema 见 §3.2.1,命名见 §3.3)。
+//! Codex rollout 写入。
 //!
 //! 行为:调 map_session → 逐行序列化 → 写 `<target>/<date>/rollout-<ts>-<uuid>.jsonl.tmp`
-//! → rename 原子落盘;目标已存在报 TargetExists(BR-9);map 出 EmptySession 报 EmptySession。
+//! → rename 原子落盘;目标已存在报 TargetExists;map 出 EmptySession 报 EmptySession。
 
 use std::fs;
 use std::io;
@@ -14,7 +14,7 @@ use crate::error::HubError;
 use crate::ir::{Role, UnifiedSession};
 use crate::mapper::{map_session, CodexEvent};
 
-/// 固定字段值(§3.2.1:照抄实验已验证的最小集,不引入未验证变量)。
+/// 固定字段值。
 const ORIGINATOR: &str = "codex-tui";
 const CLI_VERSION: &str = "0.146.0";
 const SOURCE: &str = "cli";
@@ -30,7 +30,7 @@ pub struct CodexWriteOutput {
     pub resume_command: String,
 }
 
-/// 时间与 uuid 注入点(BR-22):生产用 SystemIdGen,测试用固定实现保证黄金文件对比确定性。
+/// 时间与 uuid 注入点:生产用 SystemIdGen,测试用固定实现保证黄金文件对比确定性。
 pub trait IdGen: Send + Sync {
     /// 文件名用:如 `2026-09-11T01-02-03`(本地时间,冒号以 `-` 分隔)。
     fn now_rfc3339(&self) -> String;
@@ -43,9 +43,9 @@ pub trait IdGen: Send + Sync {
 
 /// 默认系统实现:每次调用读取当前时刻。
 ///
-/// 注:§2.1 契约规定 SystemIdGen 为单元结构体,无法在构造时缓存单一时刻快照;
+/// 注:契约规定 SystemIdGen 为单元结构体,无法在构造时缓存单一时刻快照;
 /// write_session_with 内文件名时间与日期目录为连续两次调用,跨秒错位窗口为纳秒级
-/// (§3.3 同刻要求在生产实现上的已知残余风险,见汇报)。
+/// 。
 pub struct SystemIdGen;
 
 impl IdGen for SystemIdGen {
@@ -75,7 +75,7 @@ pub fn write_session_with(
     target_root: &Path,
     gen: &dyn IdGen,
 ) -> Result<CodexWriteOutput, HubError> {
-    // §3.3:文件名 uuid == session_meta.id,同一次 uuid_v4 结果
+    // 文件名 uuid == session_meta.id,同一次 uuid_v4 结果
     let session_id = gen.uuid_v4();
     let meta_timestamp = gen.now_rfc3339_colon();
     let events = map_session(ir, &session_id, &meta_timestamp)?;
@@ -84,7 +84,7 @@ pub fn write_session_with(
     let dir = target_root.join(gen.now_date_path());
     let target = dir.join(&file_name);
 
-    // BR-9:幂等键 = 目标文件路径,已存在即拒绝
+    // 幂等键 = 目标文件路径,已存在即拒绝
     if target.exists() {
         return Err(HubError::TargetExists(target));
     }
@@ -98,7 +98,7 @@ pub fn write_session_with(
         body.push('\n');
     }
 
-    // §2.3:写 .tmp 成功后 rename;rename 前任何失败都清理 tmp,无部分写入状态
+    // 写 .tmp 成功后 rename;rename 前任何失败都清理 tmp,无部分写入状态
     let tmp = dir.join(format!("{file_name}.tmp"));
     if let Err(e) = fs::write(&tmp, body.as_bytes()) {
         let _ = fs::remove_file(&tmp);
@@ -121,7 +121,7 @@ pub fn write_session_with(
     })
 }
 
-/// 事件 → 一行 JSON(§3.2.1 权威 schema;TurnContext 行 timestamp 取 IdGen 生成时刻,同 meta)。
+/// 事件 → 一行 JSON。
 fn serialize_event(event: &CodexEvent, meta_timestamp: &str) -> String {
     match event {
         CodexEvent::SessionMeta { id, timestamp, cwd } => {
@@ -317,7 +317,7 @@ mod tests {
         let mut lines = content.lines();
         let first: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
         assert_eq!(first["type"], "session_meta");
-        assert_eq!(first["payload"]["id"], FIXED_UUID); // §3.3:文件名 uuid == session_meta.id
+        assert_eq!(first["payload"]["id"], FIXED_UUID); // 文件名 uuid == session_meta.id
         assert_eq!(first["payload"]["cwd"], "/tmp/proj");
         assert_eq!(first["payload"]["originator"], "codex-tui");
         assert_eq!(first["payload"]["cli_version"], "0.146.0");
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(second["payload"]["model"], "gpt-5");
     }
 
-    /// §2.1:map 出 EmptySession 报 EmptySession。
+    /// map 出 EmptySession 报 EmptySession。
     #[test]
     fn tc_write_01_empty_session_propagates() {
         let tmp = tempfile::tempdir().unwrap();

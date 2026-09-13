@@ -1,4 +1,4 @@
-//! 统一错误类型(契约见 MVP-DEVELOPMENT.md §2.1/§2.2)。
+//! 统一错误类型。
 
 use std::fmt;
 use std::path::PathBuf;
@@ -7,9 +7,9 @@ use std::path::PathBuf;
 pub enum HubError {
     /// 扫描根不存在 / 单个源文件不存在。
     SourceNotFound(PathBuf),
-    /// 会话无 user/assistant 消息,或 map 后事件为空(BR-11/BR-21 极端)。
+    /// 会话无 user/assistant 消息,或 map 后事件为空。
     EmptySession(PathBuf),
-    /// 目标 rollout 文件已存在(BR-9,幂等键 = 目标文件路径)。
+    /// 目标 rollout 文件已存在。
     TargetExists(PathBuf),
     /// 目标目录创建失败/无权限。
     NoWritableTarget(PathBuf),
@@ -48,7 +48,6 @@ impl From<std::io::Error> for HubError {
 mod tests {
     use super::*;
 
-    /// TC-IR-02(§6 commit ① 中列出;§7 表无独立行,此处覆盖 error.rs):
     /// HubError 各变体可展示、携带路径,Io 透出底层 source。
     #[test]
     fn tc_ir_02_hub_error_display_and_source() {
