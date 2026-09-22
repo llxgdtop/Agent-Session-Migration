@@ -4,13 +4,15 @@
 //! representation) → mapper/writer (target generation).
 //! Current version: Claude Code → Codex migration, the reverse Codex →
 //! Claude Code migration, plus ZCode (dual SQLite database) read and write;
-//! launcher provides post-migration one-click open (Terminal / ZCode), and
-//! safety provides the pre-write process guard.
+//! launcher provides post-migration one-click open (Terminal / ZCode),
+//! safety provides the pre-write process guard, and platform exposes
+//! cross-platform integration data (CJK font candidates).
 
 pub mod error;
 pub mod ir;
 pub mod launcher;
 pub mod mapper;
+pub mod platform;
 pub mod reader;
 pub mod safety;
 pub mod writer;
@@ -19,6 +21,7 @@ pub use error::HubError;
 pub use ir::{Role, SessionSummary, Tool, UnifiedMessage, UnifiedPart, UnifiedSession};
 pub use launcher::{claude_resume_command, codex_resume_command, open_in_terminal, open_zcode_app};
 pub use mapper::{map_session, CodexEvent};
+pub use platform::cjk_font_candidates;
 pub use safety::is_tool_running;
 // The readers expose identically named functions: the crate root keeps the
 // Claude Code versions (existing callers), while the Codex ones are exported
