@@ -99,7 +99,8 @@ pub fn map_session(
 /// thinking → "> 内部推理:<t>\n\n"、text → 原文、
 /// tool_use → "[调用工具 <name>] <input_json>"、tool_result → "[工具结果 <tool> isError=<b>] <content>"。
 /// 截断阈值:reasoning 1000 / tool input 500 / tool result 2000 char,追加 "…"。
-fn render_parts(parts: &[UnifiedPart]) -> String {
+/// (writer::claude 对 Claude Code 目标复用同一合并规则,故对 crate 内可见。)
+pub(crate) fn render_parts(parts: &[UnifiedPart]) -> String {
     let mut out = String::new();
     for part in parts {
         match part {

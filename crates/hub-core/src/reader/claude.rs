@@ -220,7 +220,8 @@ fn extract_result_content(content: Option<&Value>) -> String {
 
 /// 首条 user 文本前 50 个 char(不足全取);无 user 文本用 "untitled"。
 /// 跳过工具注入的包装文本(本地命令提示、中断标记等),它们不是用户真正说的话。
-fn title_of(messages: &[UnifiedMessage]) -> String {
+/// (reader::codex 复用同一规则,故对 crate 内可见。)
+pub(crate) fn title_of(messages: &[UnifiedMessage]) -> String {
     for message in messages {
         if message.role != Role::User {
             continue;
@@ -271,7 +272,8 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-fn mtime_rfc3339(path: &Path) -> Result<String, HubError> {
+/// 文件 mtime(RFC3339,UTC 毫秒)。reader::codex 的 last_active 兜底复用。
+pub(crate) fn mtime_rfc3339(path: &Path) -> Result<String, HubError> {
     let modified = fs::metadata(path)?.modified()?;
     Ok(DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true))
 }
@@ -290,7 +292,8 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HubErro
 }
 
 /// 排序键:last_active 解析为 UTC 毫秒;不可解析视为最小值。
-fn sort_key(summary: &SessionSummary) -> i64 {
+/// reader::codex 的扫描排序复用同一键。
+pub(crate) fn sort_key(summary: &SessionSummary) -> i64 {
     DateTime::parse_from_rfc3339(&summary.last_active)
         .map(|d| d.with_timezone(&Utc).timestamp_millis())
         .unwrap_or(i64::MIN)
