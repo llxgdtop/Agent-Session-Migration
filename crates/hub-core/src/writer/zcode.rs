@@ -114,11 +114,11 @@ pub fn write_session_with(
         return Err(HubError::EmptySession(ir.summary.source_path.clone()));
     }
 
-    // 会话时间忠实于源:创建取首条消息时间,更新取 IR last_active
-    //(无法解析时退化为末条消息时间)。
-    let time_created = planned[0].ts_ms;
-    let time_updated =
-        parse_ms(&ir.summary.last_active).unwrap_or(planned[planned.len() - 1].ts_ms);
+    // 会话创建/更新时间取迁移时刻:迁移后的会话要在 ZCode 任务列表顶部
+    // 立即可见。若沿用源会话的活跃时间,新迁入的会话会按旧日期沉在列表
+    // 底部(真实数据验证发现用户以为迁移失败)。会话内消息仍保留各自原始时间。
+    let time_created = now_ms;
+    let time_updated = now_ms;
 
     // ---- 2. 目标库必须已存在:绝不初始化/覆盖一个新库 ----
     if !cli_db.is_file() {
@@ -811,8 +811,8 @@ mod tests {
         assert_eq!(directory, "/Users/x/MyProj");
         assert_eq!(title, "迁移会话");
         assert_eq!(version, "1.4.2"); // 沿用库内迁移记录的应用版本
-        assert_eq!(time_created, ms("2026-09-10T10:00:00.000Z")); // 首条消息时间
-        assert_eq!(time_updated, ms("2026-09-10T10:00:05.000Z")); // IR last_active
+        assert_eq!(time_created, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻(顶部可见)
+        assert_eq!(time_updated, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
         assert_eq!(time_archived, None); // 未归档,桌面端才可见
         assert_eq!(task_type, "interactive");
         assert_eq!(title_source, "generated");
@@ -951,8 +951,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(created_at, ms("2026-09-10T10:00:00.000Z"));
-        assert_eq!(updated_at, ms("2026-09-10T10:00:05.000Z"));
+        assert_eq!(created_at, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
+        assert_eq!(updated_at, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
         assert_eq!(
             (last_unread, pinned, archived, deleted, title_overridden),
             (0, 0, 0, 0, 0)
@@ -969,8 +969,8 @@ mod tests {
         assert_eq!(meta["taskId"], sid);
         assert_eq!(meta["title"], "迁移会话");
         assert_eq!(meta["workspacePath"], "/Users/x/MyProj");
-        assert_eq!(meta["createdAt"], ms("2026-09-10T10:00:00.000Z"));
-        assert_eq!(meta["updatedAt"], ms("2026-09-10T10:00:05.000Z"));
+        assert_eq!(meta["createdAt"], ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
+        assert_eq!(meta["updatedAt"], ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
         assert_eq!(meta["mode"], "build");
         assert_eq!(meta["model"], "GLM-5.3-Flash");
         assert_eq!(meta["provider"], "builtin:bigmodel-coding-plan");
