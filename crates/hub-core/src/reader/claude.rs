@@ -90,7 +90,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
             .and_then(Value::as_str)
             .map(str::to_string);
         let parts = match value.pointer("/message/content") {
-            Some(Value::String(s)) => vec![UnifiedPart::Text(s.clone())],
+            Some(Value::String(s)) => vec![UnifiedPart::Text(strip_ansi(s))],
             Some(Value::Array(blocks)) => parse_blocks(blocks, &mut tool_names),
             _ => {
                 // user/assistant 行但 message.content 形态无法解读:按坏行计
@@ -98,6 +98,17 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
                 continue;
             }
         };
+        // 本地命令包装消息(<command-name>/<local-command-*>)是终端注入的回显,
+        // 不是用户真实发言:预览与迁移都跳过整条。
+        let is_command_echo = role == Role::User
+            && !parts.is_empty()
+            && parts.iter().all(|p| match p {
+                UnifiedPart::Text(t) => is_local_command_text(t),
+                _ => false,
+            });
+        if is_command_echo {
+            continue;
+        }
         messages.push(UnifiedMessage {
             role,
             parts,
@@ -141,21 +152,19 @@ fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> V
     let mut parts = Vec::new();
     for block in blocks {
         match block.get("type").and_then(Value::as_str) {
-            Some("text") => parts.push(UnifiedPart::Text(
+            Some("text") => parts.push(UnifiedPart::Text(strip_ansi(
                 block
                     .get("text")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            )),
+                    .unwrap_or_default(),
+            ))),
             // thinking 明文保留为 Reasoning,signature 不进入 IR
-            Some("thinking") => parts.push(UnifiedPart::Reasoning(
+            Some("thinking") => parts.push(UnifiedPart::Reasoning(strip_ansi(
                 block
                     .get("thinking")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-            )),
+                    .unwrap_or_default(),
+            ))),
             Some("tool_use") => {
                 let tool = block
                     .get("name")
@@ -182,7 +191,7 @@ fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> V
                     .unwrap_or_else(|| tool_use_id.to_string());
                 parts.push(UnifiedPart::ToolResult {
                     tool,
-                    content: extract_result_content(block.get("content")),
+                    content: strip_ansi(&extract_result_content(block.get("content"))),
                     is_error: block
                         .get("is_error")
                         .and_then(Value::as_bool)
@@ -210,6 +219,7 @@ fn extract_result_content(content: Option<&Value>) -> String {
 }
 
 /// 首条 user 文本前 50 个 char(不足全取);无 user 文本用 "untitled"。
+/// 跳过工具注入的包装文本(本地命令提示、中断标记等),它们不是用户真正说的话。
 fn title_of(messages: &[UnifiedMessage]) -> String {
     for message in messages {
         if message.role != Role::User {
@@ -217,6 +227,13 @@ fn title_of(messages: &[UnifiedMessage]) -> String {
         }
         for part in &message.parts {
             if let UnifiedPart::Text(text) = part {
+                let trimmed = text.trim_start();
+                if is_local_command_text(text)
+                    || trimmed.starts_with("Caveat:")
+                    || trimmed.starts_with("[Request interrupted")
+                {
+                    continue;
+                }
                 if !text.is_empty() {
                     return text.chars().take(TITLE_MAX_CHARS).collect();
                 }
@@ -224,6 +241,34 @@ fn title_of(messages: &[UnifiedMessage]) -> String {
         }
     }
     "untitled".to_string()
+}
+
+/// 判断 user 文本是否为终端注入的本地命令包装/回显。
+fn is_local_command_text(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<command-") || t.starts_with("<local-command")
+}
+
+/// 剥离 ANSI 转义序列(如 `\x1b[1m`),它们在界面与迁移产物中都是乱码。
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // 消费 '['
+            while let Some(&n) = chars.peek() {
+                if n.is_ascii_digit() || n == ';' || n == '?' {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            chars.next(); // 消费终结字母(m/A/K 等)
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn mtime_rfc3339(path: &Path) -> Result<String, HubError> {
@@ -452,6 +497,57 @@ mod tests {
         assert_eq!(session.messages.len(), 1);
         assert!(session.messages[0].parts.is_empty());
         assert_eq!(session.messages[0].role, Role::Assistant);
+    }
+
+    // ---------- TC-READ-09 ----------
+    /// 标题提取跳过本地命令包装文本,取第一条真实用户消息。
+    #[test]
+    fn tc_read_10_title_skips_command_wrappers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_lines(
+            &dir,
+            &[
+                r#"{"type":"user","cwd":"/tmp/p","timestamp":"2026-09-10T10:00:00.000Z","message":{"role":"user","content":"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands."}}"#
+                    .to_string(),
+                r#"{"type":"user","cwd":"/tmp/p","timestamp":"2026-09-10T10:00:01.000Z","message":{"role":"user","content":"帮我修一下登录页"}}"#
+                    .to_string(),
+            ],
+        );
+        let session = read_session(&path).unwrap();
+        assert_eq!(session.summary.title, "帮我修一下登录页");
+    }
+
+    /// 本地命令回显消息被整条跳过;文本中的 ANSI 转义序列被剥离。
+    /// 注:真实文件中 ESC 以 JSON 转义 `` 存储(裸控制字符在 JSON 中非法)。
+    #[test]
+    fn tc_read_11_command_echo_skipped_and_ansi_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let esc = "\\u001b";
+        let path = write_lines(
+            &dir,
+            &[
+                r#"{"type":"user","cwd":"/tmp/p","timestamp":"2026-09-10T10:00:00.000Z","message":{"role":"user","content":"<command-name>/model</command-name><command-message>model</command-message>"}}"#
+                    .to_string(),
+                format!(
+                    r#"{{"type":"user","cwd":"/tmp/p","timestamp":"2026-09-10T10:00:01.000Z","message":{{"role":"user","content":"Set model to {esc}[1mglm-5.3{esc}[22m"}}}}"#
+                ),
+                format!(
+                    r#"{{"type":"assistant","cwd":"/tmp/p","timestamp":"2026-09-10T10:00:02.000Z","message":{{"role":"assistant","content":[{{"type":"text","text":"收到 {esc}[1mOK{esc}[0m"}}]}}}}"#
+                ),
+            ],
+        );
+        let session = read_session(&path).unwrap();
+        // 命令回显被跳过,仅剩 2 条消息
+        assert_eq!(session.messages.len(), 2);
+        // ANSI 转义序列剥离干净
+        assert_eq!(
+            session.messages[0].parts,
+            vec![UnifiedPart::Text("Set model to glm-5.3".to_string())]
+        );
+        assert_eq!(
+            session.messages[1].parts,
+            vec![UnifiedPart::Text("收到 OK".to_string())]
+        );
     }
 
     // ---------- TC-READ-09 ----------
