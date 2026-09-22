@@ -163,6 +163,17 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
             _ => {}
         }
         if let Some(message) = produced {
+            // 环境上下文包装(<environment_context>)是 Codex 注入的运行环境回显,
+            // 不是用户真实发言:预览与迁移都跳过整条。
+            let is_env_echo = message.role == Role::User
+                && message.parts.iter().all(|p| match p {
+                    UnifiedPart::Text(t) => t.trim_start().starts_with("<environment_context>"),
+                    _ => false,
+                })
+                && !message.parts.is_empty();
+            if is_env_echo {
+                continue;
+            }
             if line_ts.is_some() {
                 last_active_line_ts = line_ts;
             }
@@ -316,6 +327,25 @@ mod tests {
                 .to_string(),
             "{not-valid-json".to_string(),
         ]
+    }
+
+    /// 环境上下文包装消息(<environment_context>)整条跳过,标题也跳过。
+    #[test]
+    fn tc_cread_env_context_echo_skipped() {
+        let dir = rollout_dir();
+        let path = write_lines(
+            &dir,
+            "rollout-2026-09-10T10-00-00-11111111-2222-4333-8444-555555555556.jsonl",
+            &[
+                r#"{"timestamp":"2026-09-10T10:00:00.000Z","type":"session_meta","payload":{"id":"x","cwd":"/tmp/p"}}"#.to_string(),
+                r#"{"timestamp":"2026-09-10T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n<cwd>/tmp/p</cwd>\n</environment_context>"}]}}"#.to_string(),
+                r#"{"timestamp":"2026-09-10T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"帮我修一下登录页"}]}}"#.to_string(),
+            ],
+        );
+        let session = read_session(&path).unwrap();
+        // 环境回显被跳过,仅剩 1 条;标题取真实用户消息
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.summary.title, "帮我修一下登录页");
     }
 
     // ---------- TC-CREAD-01 ----------

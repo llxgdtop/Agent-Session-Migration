@@ -232,6 +232,7 @@ pub(crate) fn title_of(messages: &[UnifiedMessage]) -> String {
                 if is_local_command_text(text)
                     || trimmed.starts_with("Caveat:")
                     || trimmed.starts_with("[Request interrupted")
+                    || trimmed.starts_with("<environment_context>")
                 {
                     continue;
                 }
