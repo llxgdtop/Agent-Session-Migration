@@ -2,9 +2,10 @@
 //!
 //! Layout: a slim top menu bar (app menu with "Settings…" and a direct
 //! language switch), a left sidebar with the unified session list (sessions
-//! from Claude Code / Codex / ZCode are scanned automatically, merged and
-//! sorted by recent activity, each card carries a source badge, and the
-//! source filter combines with the search box), and a right-hand
+//! from Claude Code / Codex / ZCode are scanned automatically on a
+//! background thread — first at startup, then every 30 seconds — merged
+//! and sorted by recent activity, each card carries a source badge, and
+//! the source filter combines with the search box), and a right-hand
 //! message-stream preview for the selected session. "Migrate to …" buttons
 //! dispatch per target: Codex / Claude targets show a terminal resume
 //! command that can be copied or opened in Terminal with one click; the
@@ -18,7 +19,9 @@
 
 mod i18n;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui::NumExt as _;
@@ -53,6 +56,11 @@ const COLOR_BADGE_TEXT: egui::Color32 = egui::Color32::WHITE;
 /// Source badge size: fixed width keeps badge right edges aligned.
 const BADGE_SIZE: egui::Vec2 = egui::vec2(54.0, 18.0);
 
+/// Automatic background rescan cadence. Low frequency by design: a scan
+/// touches three session stores (two JSONL trees plus a SQLite database)
+/// and the underlying data changes at human speed.
+const AUTO_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -65,7 +73,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| {
             install_cjk_fonts(&cc.egui_ctx);
-            Ok(Box::new(HubApp::new()))
+            Ok(Box::new(HubApp::new(&cc.egui_ctx)))
         }),
     )
 }
@@ -150,6 +158,21 @@ struct HubApp {
     lang: Language,
     /// Whether the settings popup window is open.
     show_settings: bool,
+    // ---------- Background scan plumbing ----------
+    /// Sender end of the scan-result channel. Cloned into every worker
+    /// thread; the app keeps one so the channel never disconnects while
+    /// running.
+    scan_tx: mpsc::Sender<Vec<SessionEntry>>,
+    /// Receiver end of the scan-result channel; drained every frame with
+    /// `try_recv` so a finished scan is applied without blocking the UI.
+    scan_rx: mpsc::Receiver<Vec<SessionEntry>>,
+    /// When the most recent scan (manual or automatic) was started; a new
+    /// automatic scan is due once this is [`AUTO_RESCAN_INTERVAL`] old.
+    /// `None` only until the first startup scan is spawned.
+    last_scan_start: Option<Instant>,
+    /// Whether a scan worker thread is in flight. At most one scan runs at
+    /// a time, so results can never arrive out of order.
+    scan_in_flight: bool,
 }
 
 /// Cross-platform home directory: $HOME on unix, %USERPROFILE% on Windows.
@@ -160,10 +183,48 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Scan all three sources and build the merged list. Runs on the worker
+/// thread, so it only touches plain data (no egui state).
+///
+/// A missing directory/database or a read failure for one source is
+/// silently skipped (common when that tool is not installed); the other
+/// sources stay unaffected — if every source fails, the result is simply
+/// an empty list. The merged list is sorted by last_active descending —
+/// the stable sort keeps the session_id tie-break within each source,
+/// and cross-source ties follow scan order (Claude -> Codex -> ZCode).
+fn scan_all_sources(
+    claude_root: &Path,
+    codex_root: &Path,
+    zcode_cli_db: &Path,
+) -> Vec<SessionEntry> {
+    let mut entries = Vec::new();
+    if let Ok(summaries) = scan_claude_sessions(claude_root) {
+        entries.extend(summaries.into_iter().map(|summary| SessionEntry {
+            tool: Tool::ClaudeCode,
+            summary,
+        }));
+    }
+    if let Ok(summaries) = scan_codex_sessions(codex_root) {
+        entries.extend(summaries.into_iter().map(|summary| SessionEntry {
+            tool: Tool::Codex,
+            summary,
+        }));
+    }
+    if let Ok(summaries) = scan_zcode_sessions(zcode_cli_db) {
+        entries.extend(summaries.into_iter().map(|summary| SessionEntry {
+            tool: Tool::ZCode,
+            summary,
+        }));
+    }
+    entries.sort_by(|a, b| b.summary.last_active.cmp(&a.summary.last_active));
+    entries
+}
+
 impl HubApp {
-    fn new() -> Self {
+    fn new(egui_ctx: &egui::Context) -> Self {
         let home = home_dir();
         let zcode_root = home.join(".zcode");
+        let (scan_tx, scan_rx) = mpsc::channel();
         let mut app = HubApp {
             claude_root: home.join(".claude").join("projects"),
             codex_root: home.join(".codex").join("sessions"),
@@ -180,8 +241,16 @@ impl HubApp {
             launch_error: None,
             lang: i18n::load_language(),
             show_settings: false,
+            scan_tx,
+            scan_rx,
+            last_scan_start: None,
+            scan_in_flight: false,
         };
-        app.rescan();
+        // The first scan also runs in the background: startup stays
+        // responsive, the empty state shows until the list lands (the
+        // worker pokes the context, so data appears as soon as it is
+        // ready rather than at the next timer repaint).
+        app.spawn_scan(egui_ctx);
         app
     }
 
@@ -194,43 +263,96 @@ impl HubApp {
         }
     }
 
-    /// Rescan all three sources and rebuild the merged list.
-    ///
-    /// A missing directory/database or a read failure for one source is
-    /// silently skipped (common when that tool is not installed); the other
-    /// sources stay unaffected. The merged list is sorted by last_active
-    /// descending — the stable sort keeps the session_id tie-break within
-    /// each source, and cross-source ties follow scan order
-    /// (Claude -> Codex -> ZCode).
-    fn rescan(&mut self) {
-        self.selected = None;
-        self.session = None;
-        self.detail_error = None;
-        self.migration = None;
-        self.run_warning = None;
-        self.launch_error = None;
+    /// Spawn a background worker that scans all three sources and sends
+    /// the merged list back through the channel. At most one worker runs
+    /// at a time; a request while one is in flight is ignored (the pending
+    /// result arrives momentarily anyway). Called immediately at startup,
+    /// by the manual "Rescan" button and by the 30-second timer — never
+    /// from the draw loop itself.
+    fn spawn_scan(&mut self, egui_ctx: &egui::Context) {
+        if self.scan_in_flight {
+            return;
+        }
+        self.scan_in_flight = true;
+        self.last_scan_start = Some(Instant::now());
+        let tx = self.scan_tx.clone();
+        let claude_root = self.claude_root.clone();
+        let codex_root = self.codex_root.clone();
+        let zcode_cli_db = self.zcode_cli_db.clone();
+        let ctx = egui_ctx.clone();
+        std::thread::spawn(move || {
+            let entries = scan_all_sources(&claude_root, &codex_root, &zcode_cli_db);
+            // A send error means the app is shutting down (receiver gone):
+            // drop everything and exit quietly. On success, wake the UI
+            // thread so the fresh list is applied this instant instead of
+            // at the next timer repaint — this is what makes the startup
+            // list pop in immediately.
+            if tx.send(entries).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+    }
 
-        let mut entries = Vec::new();
-        if let Ok(summaries) = scan_claude_sessions(&self.claude_root) {
-            entries.extend(summaries.into_iter().map(|summary| SessionEntry {
-                tool: Tool::ClaudeCode,
-                summary,
-            }));
+    /// Drain finished scan results from the channel and apply the newest
+    /// one; stale messages are discarded. With the single-flight spawn
+    /// rule at most one message can ever be pending, but the drain loop
+    /// stays correct even if that changes. Both channel errors (Empty and
+    /// Disconnected — the latter only at shutdown) simply end the drain.
+    fn pump_scan_channel(&mut self) {
+        let mut newest: Option<Vec<SessionEntry>> = None;
+        while let Ok(entries) = self.scan_rx.try_recv() {
+            newest = Some(entries);
         }
-        if let Ok(summaries) = scan_codex_sessions(&self.codex_root) {
-            entries.extend(summaries.into_iter().map(|summary| SessionEntry {
-                tool: Tool::Codex,
-                summary,
-            }));
+        if let Some(entries) = newest {
+            self.scan_in_flight = false;
+            self.apply_scan_result(entries);
         }
-        if let Ok(summaries) = scan_zcode_sessions(&self.zcode_cli_db) {
-            entries.extend(summaries.into_iter().map(|summary| SessionEntry {
-                tool: Tool::ZCode,
-                summary,
-            }));
+    }
+
+    /// Low-frequency automatic rescan. Every frame re-arms a repaint
+    /// deadline 30s out so an idle app still wakes up on time; on waking,
+    /// a new scan starts only if none is in flight and the last scan is
+    /// at least [`AUTO_RESCAN_INTERVAL`] old. Interaction-driven repaints
+    /// check the same condition, so the cadence holds either way.
+    fn maybe_auto_rescan(&mut self, ctx: &egui::Context) {
+        ctx.request_repaint_after(AUTO_RESCAN_INTERVAL);
+        let due = self
+            .last_scan_start
+            .is_none_or(|start| start.elapsed() >= AUTO_RESCAN_INTERVAL);
+        if due && !self.scan_in_flight {
+            self.spawn_scan(ctx);
         }
-        entries.sort_by(|a, b| b.summary.last_active.cmp(&a.summary.last_active));
+    }
+
+    /// Swap in a freshly scanned list. If the currently selected session
+    /// still exists (matched by source tool + session id — indices and
+    /// titles can both shift between scans), the selection and its loaded
+    /// preview/migration state are kept; only when the session has
+    /// disappeared does the right pane return to the unselected state.
+    /// Search text, source filter and language are intentionally never
+    /// touched here.
+    fn apply_scan_result(&mut self, entries: Vec<SessionEntry>) {
+        let selected_key = self
+            .selected
+            .and_then(|i| self.entries.get(i))
+            .map(|entry| (entry.tool, entry.summary.session_id.clone()));
+        let had_selection = selected_key.is_some();
         self.entries = entries;
+        self.selected = selected_key.and_then(|(tool, id)| {
+            self.entries
+                .iter()
+                .position(|entry| entry.tool == tool && entry.summary.session_id == id)
+        });
+        if had_selection && self.selected.is_none() {
+            // The selected session vanished (deleted or archived outside
+            // the app); clear the detail pane exactly like the
+            // filtered-out path in the sidebar does.
+            self.session = None;
+            self.detail_error = None;
+            self.migration = None;
+            self.run_warning = None;
+            self.launch_error = None;
+        }
     }
 
     /// Select a session and load its detail; the loading entry point is
@@ -329,6 +451,11 @@ impl HubApp {
 
 impl eframe::App for HubApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Background scan bookkeeping first, so the newest list is in
+        // place before anything draws this frame.
+        self.pump_scan_channel();
+        self.maybe_auto_rescan(ui.ctx());
+
         // Slim top menu bar (~20px): app menu with Settings + language switch.
         egui::Panel::top("menu_bar")
             .frame(
@@ -445,7 +572,9 @@ impl HubApp {
             ui.label(egui::RichText::new(t.all_sessions).heading());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(t.rescan).clicked() {
-                    self.rescan();
+                    // Same background path as the automatic timer: the
+                    // click takes effect immediately, the UI never blocks.
+                    self.spawn_scan(ui.ctx());
                 }
             });
         });
