@@ -31,6 +31,10 @@ const PROVIDER_ID: &str = "builtin:bigmodel-coding-plan";
 const MODEL_ID: &str = "GLM-5.3-Flash";
 const MODEL_VARIANT: &str = "low";
 const MODE: &str = "build";
+/// tasks 行与 meta_json 的 provider 必须是 ZCode 校验枚举
+/// (claude|opencode|gemini|codex|glm)之一,否则加载时整行被静默丢弃
+/// (真机日志:task-index-repo "读取 task index meta_json 非法")。
+const TASKS_PROVIDER: &str = "glm";
 const FINISH: &str = "completed";
 const TASK_TYPE: &str = "interactive";
 const TITLE_SOURCE: &str = "generated";
@@ -74,6 +78,8 @@ pub fn write_session_with(
     let project_dir = ir.summary.project_dir.clone();
     let now_ms = now_millis(gen)?;
     let session_id = format!("sess_{}", gen.uuid_v4());
+    // ZCode 任务列表加载时校验 meta_json,traceId 必填
+    let trace_id = gen.uuid_v4();
 
     // 逐消息渲染:每条 IR 消息 → 1 message + 1 text part(内容用统一合并规则);
     // 空 parts 或合并后为空的消息跳过;全部为空报 EmptySession。
@@ -188,7 +194,7 @@ pub fn write_session_with(
                 TITLE_SOURCE,
                 None::<&str>, // title_message_id
                 None::<i64>,  // time_title_updated
-                None::<&str>, // trace_id
+                Some(trace_id.as_str()),
             ],
         )?;
         for (index, message) in planned.iter().enumerate() {
@@ -234,7 +240,7 @@ pub fn write_session_with(
                 session_id,
                 title,
                 TASK_STATUS,
-                PROVIDER_ID,
+                TASKS_PROVIDER,
                 MODE,
                 MODEL_ID,
                 None::<&str>, // migration_source:ZCode 自身迁移用
@@ -249,10 +255,11 @@ pub fn write_session_with(
                 0,           // title_overridden
                 task_meta_json(
                     &session_id,
+                    &trace_id,
                     &title,
                     &project_dir,
                     time_created,
-                    time_updated
+                    time_updated,
                 ),
                 title,        // searchable_text:以标题参与搜索
                 None::<&str>, // cron_automation_id
@@ -473,10 +480,12 @@ struct WireTextPartData<'a> {
 }
 
 /// tasks.meta_json:桌面列表展示用的冗余快照,字段与真机观测一致。
+/// traceId 为必填(缺失则 ZCode 加载校验失败,整行被丢弃)。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskMeta<'a> {
     task_id: &'a str,
+    trace_id: &'a str,
     title: &'a str,
     workspace_path: &'a str,
     created_at: i64,
@@ -570,6 +579,7 @@ fn text_part_json(text: &str, ts_ms: i64) -> String {
 
 fn task_meta_json(
     session_id: &str,
+    trace_id: &str,
     title: &str,
     project_dir: &str,
     created: i64,
@@ -577,13 +587,14 @@ fn task_meta_json(
 ) -> String {
     let meta = TaskMeta {
         task_id: session_id,
+        trace_id,
         title,
         workspace_path: project_dir,
         created_at: created,
         updated_at: updated,
         mode: MODE,
         model: MODEL_ID,
-        provider: PROVIDER_ID,
+        provider: TASKS_PROVIDER,
         status: TASK_STATUS,
     };
     serde_json::to_string(&meta).expect("serialize zcode task meta")
@@ -831,7 +842,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
 
         let (m1_id, m1_seq, m1_data) = &messages[0];
-        assert_eq!(m1_id, &format!("msg_{}", uuid(2)));
+        assert_eq!(m1_id, &format!("msg_{}", uuid(3)));
         assert_eq!(*m1_seq, 0);
         let m1: Value = serde_json::from_str(m1_data).unwrap();
         assert!(m1.get("parentID").is_none(), "首条消息无 parentID");
@@ -845,10 +856,10 @@ mod tests {
         assert_eq!(m1["semantics"]["origin"], "real_user");
 
         let (m2_id, m2_seq, m2_data) = &messages[1];
-        assert_eq!(m2_id, &format!("msg_{}", uuid(4)));
+        assert_eq!(m2_id, &format!("msg_{}", uuid(5)));
         assert_eq!(*m2_seq, 1);
         let m2: Value = serde_json::from_str(m2_data).unwrap();
-        assert_eq!(m2["parentID"], format!("msg_{}", uuid(2)));
+        assert_eq!(m2["parentID"], format!("msg_{}", uuid(3)));
         assert_eq!(m2["role"], "assistant");
         assert_eq!(m2["modelID"], "GLM-5.3-Flash");
         assert_eq!(m2["mode"], "build");
@@ -871,7 +882,7 @@ mod tests {
             .unwrap();
         assert_eq!(parts.len(), 2);
         let (p1_id, p1_msg, p1_seq, p1_data) = &parts[0];
-        assert_eq!(p1_id, &format!("part_{}", uuid(3)));
+        assert_eq!(p1_id, &format!("part_{}", uuid(4)));
         assert_eq!(p1_msg, m1_id);
         assert_eq!(*p1_seq, 0);
         let p1: Value = serde_json::from_str(p1_data).unwrap();
@@ -922,7 +933,7 @@ mod tests {
         assert_eq!(task_id, sid); // task_id 必须等于 session.id
         assert_eq!(task_title, "迁移会话");
         assert_eq!(status, "completed");
-        assert_eq!(provider, "builtin:bigmodel-coding-plan");
+        assert_eq!(provider, "glm"); // 必须是 ZCode 校验枚举之一
         assert_eq!(mode, "build");
         assert_eq!(model, "GLM-5.3-Flash");
         let (created_at, updated_at, last_unread, pinned, archived, deleted, title_overridden): (
@@ -973,7 +984,12 @@ mod tests {
         assert_eq!(meta["updatedAt"], ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
         assert_eq!(meta["mode"], "build");
         assert_eq!(meta["model"], "GLM-5.3-Flash");
-        assert_eq!(meta["provider"], "builtin:bigmodel-coding-plan");
+        assert_eq!(meta["provider"], "glm");
+        // traceId 为 ZCode 加载校验必填(缺失整行被静默丢弃)
+        assert!(
+            meta["traceId"].is_string() && !meta["traceId"].as_str().unwrap().is_empty(),
+            "meta_json 必须含非空 traceId"
+        );
         assert_eq!(meta["status"], "completed");
     }
 
@@ -1194,7 +1210,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO message(id, session_id, time_created, time_updated, data, sequence) \
                  VALUES(?1, 'sess-existing', 1, 1, '{}', 0)",
-                params![format!("msg_{}", uuid(2))],
+                params![format!("msg_{}", uuid(3))],
             )
             .unwrap();
         }
