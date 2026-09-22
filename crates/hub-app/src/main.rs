@@ -3,18 +3,20 @@
 //! 界面:左侧为统一会话列表(自动扫描 Claude Code / Codex / ZCode 三家来源,
 //! 合并后按最近活跃排序,卡片右上角带来源徽章,来源筛选与搜索叠加过滤),
 //! 右侧为所选会话的消息流预览;「迁移到 …」按钮组按目标分发转换——
-//! Codex / Claude 目标给出可直接复制到终端的续聊命令,
-//! ZCode 目标(桌面应用)给出打开应用查看任务的指引。
+//! Codex / Claude 目标给出可直接复制到终端的续聊命令(可一键在 Terminal 打开),
+//! ZCode 目标(桌面应用)给出打开应用查看任务的指引(可一键打开 ZCode);
+//! 迁移前检测目标工具进程,运行中先警示冲突、用户确认后才放行。
 
 use std::path::PathBuf;
 
 use eframe::egui;
 use egui::NumExt as _;
 use hub_core::{
-    read_codex_session, read_session as read_claude_session, read_zcode_session,
-    scan_codex_sessions, scan_sessions as scan_claude_sessions, scan_zcode_sessions,
-    write_claude_session, write_session as write_codex_session, write_zcode_session, Role,
-    SessionSummary, Tool, UnifiedPart, UnifiedSession,
+    is_tool_running, open_in_terminal, open_zcode_app, read_codex_session,
+    read_session as read_claude_session, read_zcode_session, scan_codex_sessions,
+    scan_sessions as scan_claude_sessions, scan_zcode_sessions, write_claude_session,
+    write_session as write_codex_session, write_zcode_session, Role, SessionSummary, Tool,
+    UnifiedPart, UnifiedSession,
 };
 
 // ---- 配色(集中定义,便于统一调整)----
@@ -96,6 +98,14 @@ struct MigrationOk {
     parse_warnings: usize,
 }
 
+/// 写入前护栏警告:目标工具进程运行中,迁移暂缓,等待用户「仍要迁移」确认。
+struct RunWarning {
+    /// 待迁移的目标工具(用户确认后直接使用,不再重复检测)。
+    target: Tool,
+    /// 完整警告文案(含工具名;ZCode 追加数据损坏风险提示)。
+    message: String,
+}
+
 struct HubApp {
     claude_root: PathBuf,
     codex_root: PathBuf,
@@ -110,6 +120,10 @@ struct HubApp {
     session: Option<UnifiedSession>,
     detail_error: Option<String>,
     migration: Option<Result<MigrationOk, String>>,
+    /// 写入前护栏:目标工具运行中的冲突警告(Some 时显示警告面板与「仍要迁移」)。
+    run_warning: Option<RunWarning>,
+    /// 一键打开(终端 / ZCode)失败的错误提示,随迁移成功面板一起显示。
+    launch_error: Option<String>,
 }
 
 impl HubApp {
@@ -128,6 +142,8 @@ impl HubApp {
             session: None,
             detail_error: None,
             migration: None,
+            run_warning: None,
+            launch_error: None,
         };
         app.rescan();
         app
@@ -144,6 +160,8 @@ impl HubApp {
         self.session = None;
         self.detail_error = None;
         self.migration = None;
+        self.run_warning = None;
+        self.launch_error = None;
 
         let mut entries = Vec::new();
         if let Ok(summaries) = scan_claude_sessions(&self.claude_root) {
@@ -169,9 +187,12 @@ impl HubApp {
     }
 
     /// 选中会话并读取详情;读取入口按来源分发。
+    /// 切换会话即切换迁移上下文:护栏警告与一键打开失败提示一并清除。
     fn select(&mut self, index: usize) {
         self.selected = Some(index);
         self.migration = None;
+        self.run_warning = None;
+        self.launch_error = None;
         let entry = &self.entries[index];
         let result = match entry.tool {
             // Claude / Codex 会话为独立 JSONL 文件,直接按路径读取
@@ -192,9 +213,28 @@ impl HubApp {
         }
     }
 
+    /// 迁移入口(写入前护栏):用户点击迁移按钮时先检测目标工具进程。
+    ///
+    /// 运行中 → 不直接写入,记录警告并返回,由界面展示冲突风险与「仍要迁移」按钮;
+    /// 未运行 → 清掉旧警告直接迁移。pgrep 只在用户点击按钮时调用,不在绘制循环里轮询。
+    fn request_migrate(&mut self, target: Tool) {
+        if is_tool_running(target) {
+            self.run_warning = Some(RunWarning {
+                target,
+                message: run_warning_message(target),
+            });
+            return;
+        }
+        self.run_warning = None;
+        self.do_migrate(target);
+    }
+
     /// 执行迁移:按目标工具分发到对应写入器。
     /// 写入函数自带护栏(幂等、原子落盘 / 事务 + 自动备份),UI 无需额外防护。
+    /// 进入即清除护栏警告与一键打开失败提示(本次迁移会产生全新的状态)。
     fn do_migrate(&mut self, target: Tool) {
+        self.run_warning = None;
+        self.launch_error = None;
         let Some(session) = &self.session else {
             return;
         };
@@ -308,6 +348,8 @@ impl HubApp {
                 self.session = None;
                 self.detail_error = None;
                 self.migration = None;
+                self.run_warning = None;
+                self.launch_error = None;
             }
         }
         let filtering = self.source_filter != SourceFilter::All || !query.is_empty();
@@ -509,11 +551,12 @@ impl HubApp {
                     response.on_disabled_hover_text("该会话没有可迁移的内容")
                 };
                 if response.clicked() {
-                    self.do_migrate(target);
+                    self.request_migrate(target);
                 }
             }
         });
         ui.add_space(4.0);
+        self.show_run_warning(ui);
         self.show_migration_result(ui);
 
         ui.add_space(6.0);
@@ -586,78 +629,152 @@ impl HubApp {
             });
     }
 
+    /// 写入前护栏警告面板:目标工具运行中时提示冲突风险;
+    /// 「仍要迁移」由用户确认后放行本次迁移(不重新检测,警告随即清除)。
+    fn show_run_warning(&mut self, ui: &mut egui::Ui) {
+        let Some(warning) = &self.run_warning else {
+            return;
+        };
+        // 确认动作先落本地变量,面板画完后再变更状态,避免借用冲突
+        let mut confirmed: Option<Tool> = None;
+        notice_panel(ui, COLOR_WARN_BUBBLE, COLOR_WARN_TEXT, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                egui::RichText::new(&warning.message)
+                    .small()
+                    .color(COLOR_WARN_TEXT),
+            );
+            ui.add_space(2.0);
+            let button = egui::Button::new(egui::RichText::new("仍要迁移").strong())
+                .min_size(egui::vec2(96.0, 24.0));
+            if ui.add(button).clicked() {
+                confirmed = Some(warning.target);
+            }
+        });
+        if let Some(target) = confirmed {
+            // 用户已知晓风险:清警告并立即执行本次迁移
+            self.run_warning = None;
+            self.do_migrate(target);
+        }
+    }
+
     fn show_migration_result(&mut self, ui: &mut egui::Ui) {
         let Some(result) = &self.migration else {
             return;
         };
         match result {
-            Ok(ok) => notice_panel(ui, COLOR_OK_BUBBLE, COLOR_OK_TEXT, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    egui::RichText::new("迁移成功")
-                        .strong()
-                        .color(COLOR_OK_TEXT),
-                );
-                if ok.parse_warnings > 0 {
+            Ok(ok) => {
+                // 一键打开的失败提示:进闭包前拷出历史值,按钮结果先落本地,
+                // 面板画完后再统一写回(成功清除、失败记录原因,并在本帧立即显示)
+                let mut launch_error = self.launch_error.clone();
+                notice_panel(ui, COLOR_OK_BUBBLE, COLOR_OK_TEXT, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new(format!(
-                            "已跳过 {} 行无法解析的源内容",
-                            ok.parse_warnings
-                        ))
-                        .small()
-                        .color(COLOR_OK_TEXT),
+                        egui::RichText::new("迁移成功")
+                            .strong()
+                            .color(COLOR_OK_TEXT),
                     );
-                }
-                if ok.target != Tool::ZCode {
-                    // Codex / Claude 目标:在终端执行命令继续会话
-                    if let Some(command) = ok.resume_command.as_deref() {
+                    if ok.parse_warnings > 0 {
                         ui.label(
-                            egui::RichText::new("在终端执行以下命令,继续这个会话:")
-                                .small()
-                                .color(COLOR_OK_TEXT),
+                            egui::RichText::new(format!(
+                                "已跳过 {} 行无法解析的源内容",
+                                ok.parse_warnings
+                            ))
+                            .small()
+                            .color(COLOR_OK_TEXT),
                         );
-                        ui.add_space(2.0);
-                        egui::Frame::new()
-                            .fill(ui.visuals().extreme_bg_color)
-                            .corner_radius(4)
-                            .inner_margin(egui::Margin::symmetric(8, 5))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.add(
-                                    egui::Label::new(egui::RichText::new(command).monospace())
-                                        .truncate(),
-                                );
-                            });
-                        if ui.button("复制命令").clicked() {
-                            ui.ctx().copy_text(command.to_string());
-                        }
                     }
-                    if let Some(path) = ok.file_path.as_deref() {
+                    if ok.target != Tool::ZCode {
+                        // Codex / Claude 目标:在终端执行命令继续会话
+                        if let Some(command) = ok.resume_command.as_deref() {
+                            ui.label(
+                                egui::RichText::new("在终端执行以下命令,继续这个会话:")
+                                    .small()
+                                    .color(COLOR_OK_TEXT),
+                            );
+                            ui.add_space(2.0);
+                            egui::Frame::new()
+                                .fill(ui.visuals().extreme_bg_color)
+                                .corner_radius(4)
+                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(command).monospace())
+                                            .truncate(),
+                                    );
+                                });
+                            // 主按钮:一键在 Terminal 中打开;副按钮:复制命令兜底
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let open_button =
+                                    egui::Button::new(egui::RichText::new("在终端中打开").strong())
+                                        .min_size(egui::vec2(132.0, 26.0));
+                                if ui.add(open_button).clicked() {
+                                    match open_in_terminal(command) {
+                                        Ok(()) => launch_error = None,
+                                        Err(e) => launch_error = Some(e.to_string()),
+                                    }
+                                }
+                                if ui.button("复制命令").clicked() {
+                                    ui.ctx().copy_text(command.to_string());
+                                }
+                            });
+                            if let Some(err) = &launch_error {
+                                ui.colored_label(
+                                    COLOR_ERR_TEXT,
+                                    format!(
+                                        "在终端中打开失败:{err}。请复制上方命令到终端手动执行。"
+                                    ),
+                                );
+                            }
+                        }
+                        if let Some(path) = ok.file_path.as_deref() {
+                            ui.label(
+                                egui::RichText::new(format!("产物文件:{path}"))
+                                    .small()
+                                    .weak()
+                                    .monospace(),
+                            );
+                        }
+                    } else {
+                        // ZCode 目标:桌面应用无终端命令,给出打开指引与一键启动
                         ui.label(
-                            egui::RichText::new(format!("产物文件:{path}"))
+                            egui::RichText::new(format!(
+                                "迁移完成,打开 ZCode 应用即可在任务列表中看到(会话标题:{})",
+                                ok.title
+                            ))
+                            .small()
+                            .color(COLOR_OK_TEXT),
+                        );
+                        ui.add_space(4.0);
+                        let open_button =
+                            egui::Button::new(egui::RichText::new("打开 ZCode").strong())
+                                .min_size(egui::vec2(132.0, 26.0));
+                        if ui.add(open_button).clicked() {
+                            match open_zcode_app() {
+                                Ok(()) => launch_error = None,
+                                Err(e) => launch_error = Some(e.to_string()),
+                            }
+                        }
+                        if let Some(err) = &launch_error {
+                            ui.colored_label(
+                                COLOR_ERR_TEXT,
+                                format!(
+                                    "打开 ZCode 失败:{err}。请手动启动 ZCode 应用查看迁移结果。"
+                                ),
+                            );
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("session id:{}", ok.session_id))
                                 .small()
                                 .weak()
                                 .monospace(),
                         );
                     }
-                } else {
-                    // ZCode 目标:桌面应用无终端命令,给出打开指引与 session_id
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "迁移完成,打开 ZCode 应用即可在任务列表中看到(会话标题:{})",
-                            ok.title
-                        ))
-                        .small()
-                        .color(COLOR_OK_TEXT),
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("session id:{}", ok.session_id))
-                            .small()
-                            .weak()
-                            .monospace(),
-                    );
-                }
-            }),
+                });
+                self.launch_error = launch_error;
+            }
             Err(err) => {
                 ui.colored_label(COLOR_ERR_TEXT, format!("迁移失败:{err}"));
             }
@@ -708,6 +825,28 @@ fn migrate_target_label(tool: Tool) -> &'static str {
         Tool::Codex => "迁移到 Codex  →",
         Tool::ZCode => "迁移到 ZCode  →",
     }
+}
+
+/// 工具在界面文案中的短名(警告提示等使用,与徽章文案一致)。
+fn tool_display_name(tool: Tool) -> &'static str {
+    match tool {
+        Tool::ClaudeCode => "Claude",
+        Tool::Codex => "Codex",
+        Tool::ZCode => "ZCode",
+    }
+}
+
+/// 写入前护栏的警告文案:目标工具运行中的冲突提示;
+/// ZCode 的库是 SQLite 双库,运行中写入有数据损坏风险,额外加强提醒。
+fn run_warning_message(target: Tool) -> String {
+    let name = tool_display_name(target);
+    let mut message = format!(
+        "检测到 {name} 正在运行,迁移写入可能与它冲突。请先退出 {name},或点击「仍要迁移」继续。"
+    );
+    if target == Tool::ZCode {
+        message.push_str("ZCode 运行中写入有数据损坏风险,强烈建议先退出。");
+    }
+    message
 }
 
 /// RFC3339 时间戳显示为 "MM-DD HH:MM"(解析失败则原样返回)。
