@@ -1,55 +1,78 @@
 # Agent Session Hub
 
-**让你的 AI 编程会话,不再被工具锁死。**
+**Your AI coding sessions, freed from tool lock-in.**
 
-在 Claude Code 里聊到一半的工作,一键迁移到 Codex 接着干——消息、推理过程、工具调用记录完整保留,无需从头交代背景。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 它能做什么
+<!-- TODO: screenshot. Capture the main window and save as docs/screenshot.png, then uncomment:
+![Agent Session Hub main window](docs/screenshot.png)
+-->
 
-- **会话一览**:自动读取本机所有 Claude Code 会话,按最近活跃排序,点开即可预览完整消息流
-- **一键迁移**:选中任意会话,转换为 Codex 会话格式写入本机,源文件不被修改
-- **无缝续聊**:迁移完成即给出续聊命令,复制到终端执行,Codex 就带着全部上下文继续工作
+Start a task in one AI coding tool, finish it in another. Agent Session Hub moves coding-agent sessions between Claude Code, Codex, and ZCode in any direction -- messages, reasoning, and tool-call records included -- so the next tool picks up exactly where the last one left off. No re-explaining the context from scratch.
 
-## 使用
+## What it does
 
-1. 构建并启动应用:
+- **Session overview** -- Scans all Claude Code, Codex, and ZCode sessions on your machine into a single list, sorted by recent activity, with source badges plus per-source filters and search. Click any session to preview the full message stream.
+- **One-click migration** -- Convert any session to any of the three tools (all six directions are supported). Migration only creates new files or new database rows; your existing sessions are never touched.
+- **Seamless continuation** -- After migrating to Claude Code or Codex, copy the resume command the app hands you (or open it in Terminal with one click) and keep working with full context. Migrating to ZCode opens the ZCode desktop app, where the session appears in your task list.
 
-   ```sh
-   cargo build --release
-   ./scripts/build-app.sh        # 生成 dist/AgentSessionHub.app,双击即可打开
-   ```
+## Quick start
 
-2. 在左侧列表选择一个会话,确认预览内容
-3. 点击「迁移到 Codex」
-4. 复制界面给出的命令,粘贴到终端执行——开始续聊
-
-## 隐私与安全
-
-- **纯本地运行**:不联网、不上传任何数据
-- **只增不改**:迁移仅新建文件,绝不修改你的 Claude Code 与 Codex 既有数据
-- **原子写入**:先写临时文件再落盘,失败不会产生半成品
-
-## 支持范围
-
-当前版本支持 **Claude Code → Codex** 单向迁移。
-
-路线图:
-
-- 支持反方向迁移(Codex → Claude Code)
-- 支持 ZCode(读入与写出)
-- 三个工具任意方向互迁,统一会话列表
-- 迁移前自动检测目标工具运行状态并备份数据
-
-## 开发
+Requirements: macOS 11 or later and a recent Rust toolchain. Windows and Linux builds are on the roadmap.
 
 ```sh
-cargo test                    # 运行全部测试
-cargo run -p hub-app          # 开发模式启动
-cargo clippy --all-targets    # 静态检查
+cargo build --release
+./scripts/build-app.sh          # produces dist/AgentSessionHub.app
+open dist/AgentSessionHub.app   # or double-click the app in Finder
 ```
 
-架构:`crates/hub-core`(核心库:读取 → 统一中间表示 → 写入)+ `crates/hub-app`(界面)。
+To migrate a session:
 
-## 许可
+1. Pick a session in the list and review the preview.
+2. Click the migrate button for the target tool. If the target tool is currently running, the app warns you first and only writes after you confirm.
+3. Copy the resume command into your terminal -- or let the app open it for you -- and continue the conversation.
 
-私有项目,保留所有权利。
+## How it works
+
+Each tool stores sessions in its own format: JSONL files under `~/.claude/projects` and `~/.codex/sessions`, and a pair of SQLite databases under `~/.zcode/`. Agent Session Hub normalizes them through a three-stage pipeline:
+
+```
+reader (parse source format) --> unified IR --> writer (emit target format)
+```
+
+- `crates/hub-core` -- the core library: per-tool readers, the unified intermediate representation, per-tool writers, plus the resume-command launcher and the pre-write safety checks.
+- `crates/hub-app` -- the native desktop UI (built with egui/eframe).
+
+Everything runs on your machine. The app makes no network requests.
+
+## Privacy & safety
+
+- **Local only.** No network access, no telemetry, nothing uploaded.
+- **Additive only.** Migration creates new files or new rows. Existing sessions are never modified or deleted.
+- **Atomic writes.** File targets are written to a temporary file and renamed into place; ZCode targets are written inside a single SQLite transaction per database. A failure never leaves a half-written session behind.
+- **Guarded ZCode writes.** Before touching ZCode's databases, the app verifies the schema version (and refuses to write if it does not recognize it) and makes timestamped backups; if a backup fails, the migration aborts.
+- **Running-tool detection.** Writing while the target tool is running risks conflicts or corruption, so the app checks for running processes and asks you to confirm before proceeding.
+
+## Roadmap
+
+- Dark mode
+- Drag-and-drop migration
+- Windows and Linux builds
+- Redaction of sensitive data before migration
+- Cross-machine session transfer
+
+## Contributing
+
+Issues and pull requests are welcome. To work on the app locally:
+
+```sh
+cargo test                  # run all tests
+cargo run -p hub-app        # run the app in dev mode
+cargo clippy --all-targets  # lint
+```
+
+Conversion logic lives in `crates/hub-core`; the UI lives in `crates/hub-app`.
+
+## License
+
+TBD. A license has not been chosen yet.
