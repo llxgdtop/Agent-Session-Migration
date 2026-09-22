@@ -1,11 +1,22 @@
-//! Agent Session Hub 桌面应用。
+//! Agent Session Hub desktop app.
 //!
-//! 界面:左侧为统一会话列表(自动扫描 Claude Code / Codex / ZCode 三家来源,
-//! 合并后按最近活跃排序,卡片右上角带来源徽章,来源筛选与搜索叠加过滤),
-//! 右侧为所选会话的消息流预览;「迁移到 …」按钮组按目标分发转换——
-//! Codex / Claude 目标给出可直接复制到终端的续聊命令(可一键在 Terminal 打开),
-//! ZCode 目标(桌面应用)给出打开应用查看任务的指引(可一键打开 ZCode);
-//! 迁移前检测目标工具进程,运行中先警示冲突、用户确认后才放行。
+//! Layout: a slim top menu bar (app menu with "Settings…" and a direct
+//! language switch), a left sidebar with the unified session list (sessions
+//! from Claude Code / Codex / ZCode are scanned automatically, merged and
+//! sorted by recent activity, each card carries a source badge, and the
+//! source filter combines with the search box), and a right-hand
+//! message-stream preview for the selected session. "Migrate to …" buttons
+//! dispatch per target: Codex / Claude targets show a terminal resume
+//! command that can be copied or opened in Terminal with one click; the
+//! ZCode target (a desktop app) shows how to open the app. Before writing,
+//! the target tool is checked for running processes and the user must
+//! confirm when a conflict is detected.
+//!
+//! All user-facing text comes from [`crate::i18n`] (zh/en); see that module
+//! for what is intentionally NOT translated (core error text, writer-format
+//! preview prefixes). Code comments are English per project convention.
+
+mod i18n;
 
 use std::path::PathBuf;
 
@@ -18,8 +29,9 @@ use hub_core::{
     write_session as write_codex_session, write_zcode_session, Role, SessionSummary, Tool,
     UnifiedPart, UnifiedSession,
 };
+use i18n::Language;
 
-// ---- 配色(集中定义,便于统一调整)----
+// ---- Color palette (centralized for easy tuning) ----
 const COLOR_USER_ROLE: egui::Color32 = egui::Color32::from_rgb(37, 99, 200);
 const COLOR_USER_BUBBLE: egui::Color32 = egui::Color32::from_rgb(238, 244, 253);
 const COLOR_ASSISTANT_ROLE: egui::Color32 = egui::Color32::from_rgb(34, 139, 92);
@@ -29,14 +41,16 @@ const COLOR_OK_TEXT: egui::Color32 = egui::Color32::from_rgb(31, 112, 55);
 const COLOR_WARN_BUBBLE: egui::Color32 = egui::Color32::from_rgb(253, 246, 227);
 const COLOR_WARN_TEXT: egui::Color32 = egui::Color32::from_rgb(146, 106, 12);
 const COLOR_ERR_TEXT: egui::Color32 = egui::Color32::from_rgb(190, 45, 45);
-/// 未选中会话卡片的底色(需要肉眼可辨,拉开条目间距感)
+/// Background of unselected session cards (must be visually distinct so
+/// cards read as separate rows).
 const COLOR_CARD_BG: egui::Color32 = egui::Color32::from_rgb(242, 243, 246);
-// 来源徽章配色:暖橙(Claude)/ 墨绿(Codex)/ 靛蓝(ZCode),统一白字保证可读。
+// Source badge palette: warm orange (Claude) / dark green (Codex) /
+// indigo (ZCode), all with white text for readability.
 const COLOR_BADGE_CLAUDE: egui::Color32 = egui::Color32::from_rgb(194, 94, 58);
 const COLOR_BADGE_CODEX: egui::Color32 = egui::Color32::from_rgb(31, 111, 84);
 const COLOR_BADGE_ZCODE: egui::Color32 = egui::Color32::from_rgb(59, 91, 219);
 const COLOR_BADGE_TEXT: egui::Color32 = egui::Color32::WHITE;
-/// 来源徽章尺寸:固定宽度让各卡片的徽章右缘对齐。
+/// Source badge size: fixed width keeps badge right edges aligned.
 const BADGE_SIZE: egui::Vec2 = egui::vec2(54.0, 18.0);
 
 fn main() -> eframe::Result<()> {
@@ -56,23 +70,24 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-/// 列表项:会话摘要 + 来源工具(决定徽章配色、详情读取入口与迁移目标分发)。
+/// List entry: session summary plus source tool (drives badge color, the
+/// detail-loading entry point and the migration dispatch).
 struct SessionEntry {
     tool: Tool,
     summary: SessionSummary,
 }
 
-/// 顶部来源筛选项,与搜索叠加(AND)过滤列表。
+/// Source filter entry; combines (AND) with the search box.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SourceFilter {
-    /// 三家全部显示。
+    /// Show all three sources.
     All,
-    /// 只看某一家。
+    /// Show a single source.
     Source(Tool),
 }
 
 impl SourceFilter {
-    /// 该来源在当前筛选下是否可见。
+    /// Is the given tool visible under this filter?
     fn matches(self, tool: Tool) -> bool {
         match self {
             Self::All => true,
@@ -81,37 +96,41 @@ impl SourceFilter {
     }
 }
 
-/// 迁移成功后的展示状态(错误以 Display 字符串保存)。
+/// Post-migration success state (errors are stored as Display strings).
 ///
-/// Codex / Claude 目标给出终端续聊命令与产物文件路径;
-/// ZCode 目标为桌面应用,没有终端命令,改为打开指引文案与 session_id。
+/// Codex / Claude targets provide a terminal resume command and the output
+/// file path; the ZCode target is a desktop app, so it gets an open-app
+/// guidance text and the session id instead.
 struct MigrationOk {
-    /// 迁移目标工具,决定成功面板的展示形态。
+    /// Migration target; decides the shape of the success panel.
     target: Tool,
-    /// 会话标题(ZCode 提示文案引用)。
+    /// Session title (referenced by the ZCode guidance text).
     title: String,
     session_id: String,
-    /// 终端续聊命令;ZCode 无命令时为 None。
+    /// Terminal resume command; `None` for ZCode.
     resume_command: Option<String>,
-    /// 产物文件路径;ZCode 写入 SQLite 双库无单文件产物,为 None。
+    /// Output file path; `None` for ZCode (SQLite dual-DB, no single file).
     file_path: Option<String>,
     parse_warnings: usize,
 }
 
-/// 写入前护栏警告:目标工具进程运行中,迁移暂缓,等待用户「仍要迁移」确认。
+/// Pre-write guardrail: the target tool process is running, so migration is
+/// on hold until the user confirms via "Migrate Anyway". Only the target is
+/// stored; the warning text is rendered from the currently selected
+/// language at draw time (a stored message would go stale on language
+/// switch).
 struct RunWarning {
-    /// 待迁移的目标工具(用户确认后直接使用,不再重复检测)。
+    /// Pending migration target (used directly after confirmation, no
+    /// re-check).
     target: Tool,
-    /// 完整警告文案(含工具名;ZCode 追加数据损坏风险提示)。
-    message: String,
 }
 
 struct HubApp {
     claude_root: PathBuf,
     codex_root: PathBuf,
-    /// ZCode 会话正文库(读取与写入共用)。
+    /// ZCode session body database (shared by reads and writes).
     zcode_cli_db: PathBuf,
-    /// ZCode 桌面任务列表库(迁移写入用)。
+    /// ZCode desktop task-list database (migration writes).
     zcode_tasks_db: PathBuf,
     entries: Vec<SessionEntry>,
     search_query: String,
@@ -120,10 +139,17 @@ struct HubApp {
     session: Option<UnifiedSession>,
     detail_error: Option<String>,
     migration: Option<Result<MigrationOk, String>>,
-    /// 写入前护栏:目标工具运行中的冲突警告(Some 时显示警告面板与「仍要迁移」)。
+    /// Pre-write guardrail: conflict warning while the target tool is
+    /// running (when `Some`, a warning panel and a "Migrate Anyway"
+    /// button are shown).
     run_warning: Option<RunWarning>,
-    /// 一键打开(终端 / ZCode)失败的错误提示,随迁移成功面板一起显示。
+    /// Error from one-click opens (Terminal / ZCode); shown alongside the
+    /// migration success panel.
     launch_error: Option<String>,
+    /// UI language preference, persisted to ~/.agent-session-hub/settings.json.
+    lang: Language,
+    /// Whether the settings popup window is open.
+    show_settings: bool,
 }
 
 impl HubApp {
@@ -144,17 +170,30 @@ impl HubApp {
             migration: None,
             run_warning: None,
             launch_error: None,
+            lang: i18n::load_language(),
+            show_settings: false,
         };
         app.rescan();
         app
     }
 
-    /// 重新扫描三家来源并合并列表。
+    /// Switch the UI language and persist it immediately. egui re-renders
+    /// every frame, so the new strings take effect on the next frame.
+    fn set_language(&mut self, lang: Language) {
+        if self.lang != lang {
+            self.lang = lang;
+            i18n::store_language(lang);
+        }
+    }
+
+    /// Rescan all three sources and rebuild the merged list.
     ///
-    /// 某一家目录/库不存在或读取失败时静默跳过该家(常见于未安装该工具),
-    /// 不影响其余家;合并后统一按 last_active 倒序——
-    /// 稳定排序保留各家内部的 session_id tie-break,
-    /// 跨家同刻按扫描顺序(Claude → Codex → ZCode)。
+    /// A missing directory/database or a read failure for one source is
+    /// silently skipped (common when that tool is not installed); the other
+    /// sources stay unaffected. The merged list is sorted by last_active
+    /// descending — the stable sort keeps the session_id tie-break within
+    /// each source, and cross-source ties follow scan order
+    /// (Claude -> Codex -> ZCode).
     fn rescan(&mut self) {
         self.selected = None;
         self.session = None;
@@ -186,8 +225,9 @@ impl HubApp {
         self.entries = entries;
     }
 
-    /// 选中会话并读取详情;读取入口按来源分发。
-    /// 切换会话即切换迁移上下文:护栏警告与一键打开失败提示一并清除。
+    /// Select a session and load its detail; the loading entry point is
+    /// dispatched by source. Switching sessions switches the migration
+    /// context: the guardrail warning and one-click-open error are cleared.
     fn select(&mut self, index: usize) {
         self.selected = Some(index);
         self.migration = None;
@@ -195,10 +235,11 @@ impl HubApp {
         self.launch_error = None;
         let entry = &self.entries[index];
         let result = match entry.tool {
-            // Claude / Codex 会话为独立 JSONL 文件,直接按路径读取
+            // Claude / Codex sessions are standalone JSONL files, read by path
             Tool::ClaudeCode => read_claude_session(&entry.summary.source_path),
             Tool::Codex => read_codex_session(&entry.summary.source_path),
-            // ZCode 会话正文在 SQLite 库内,source_path 只是库路径,需按 id 读取
+            // ZCode session bodies live inside the SQLite database; the
+            // source_path is only the database path, read by session id
             Tool::ZCode => read_zcode_session(&self.zcode_cli_db, &entry.summary.session_id),
         };
         match result {
@@ -213,25 +254,28 @@ impl HubApp {
         }
     }
 
-    /// 迁移入口(写入前护栏):用户点击迁移按钮时先检测目标工具进程。
+    /// Migration entry point (pre-write guardrail): when the user clicks a
+    /// migrate button, the target tool is first checked for a running
+    /// process.
     ///
-    /// 运行中 → 不直接写入,记录警告并返回,由界面展示冲突风险与「仍要迁移」按钮;
-    /// 未运行 → 清掉旧警告直接迁移。pgrep 只在用户点击按钮时调用,不在绘制循环里轮询。
+    /// Running -> do not write yet; record a warning and return, the UI
+    /// shows the conflict risk and a "Migrate Anyway" button. Not running
+    /// -> clear any old warning and migrate right away. pgrep is only
+    /// invoked on button clicks, never polled in the draw loop.
     fn request_migrate(&mut self, target: Tool) {
         if is_tool_running(target) {
-            self.run_warning = Some(RunWarning {
-                target,
-                message: run_warning_message(target),
-            });
+            self.run_warning = Some(RunWarning { target });
             return;
         }
         self.run_warning = None;
         self.do_migrate(target);
     }
 
-    /// 执行迁移:按目标工具分发到对应写入器。
-    /// 写入函数自带护栏(幂等、原子落盘 / 事务 + 自动备份),UI 无需额外防护。
-    /// 进入即清除护栏警告与一键打开失败提示(本次迁移会产生全新的状态)。
+    /// Run the migration, dispatching to the writer for the target tool.
+    /// The writers have their own guardrails (idempotency, atomic writes /
+    /// transactions + automatic backup), so the UI adds none. Entering
+    /// clears the guardrail warning and the one-click-open error (this
+    /// migration produces a completely fresh state).
     fn do_migrate(&mut self, target: Tool) {
         self.run_warning = None;
         self.launch_error = None;
@@ -262,7 +306,8 @@ impl HubApp {
             Tool::ZCode => write_zcode_session(session, &self.zcode_cli_db, &self.zcode_tasks_db)
                 .map(|out| MigrationOk {
                     session_id: out.session_id,
-                    // ZCode 为桌面应用:无终端命令,成功面板改为打开指引
+                    // ZCode is a desktop app: no terminal command, the
+                    // success panel shows open-app guidance instead
                     resume_command: None,
                     file_path: None,
                     title,
@@ -276,6 +321,17 @@ impl HubApp {
 
 impl eframe::App for HubApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Slim top menu bar (~20px): app menu with Settings + language switch.
+        egui::Panel::top("menu_bar")
+            .frame(
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(8, 1))
+                    .fill(ui.visuals().panel_fill),
+            )
+            .show(ui, |ui| {
+                self.show_menu_bar(ui);
+            });
+
         egui::Panel::left("sessions")
             .default_size(400.0)
             .show(ui, |ui| {
@@ -285,32 +341,116 @@ impl eframe::App for HubApp {
         egui::CentralPanel::default_margins().show(ui, |ui| {
             self.show_detail(ui);
         });
+
+        self.show_settings_window(ui.ctx());
     }
 }
 
 impl HubApp {
-    // ---------- 左侧:统一会话列表 ----------
+    // ---------- Top: menu bar ----------
+
+    /// macOS-style app menu: one "Agent Session Hub" menu holding
+    /// "Settings…" (opens the popup window) and a direct language switch,
+    /// so the language is reachable without opening Settings.
+    fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
+        let t = self.lang.resolved().strings();
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("Agent Session Hub", |ui| {
+                if ui.button(t.settings_menu).clicked() {
+                    self.show_settings = true;
+                    ui.close();
+                }
+                ui.separator();
+                // Direct language switch (radio semantics, applied at once).
+                let mut lang = self.lang;
+                ui.radio_value(&mut lang, Language::System, t.language_system);
+                ui.radio_value(&mut lang, Language::Chinese, t.language_chinese);
+                ui.radio_value(&mut lang, Language::English, t.language_english);
+                if lang != self.lang {
+                    self.set_language(lang);
+                }
+            });
+        });
+    }
+
+    // ---------- Settings popup ----------
+
+    /// Settings popup (`egui::Window`): language radio trio plus app info.
+    /// The window owns its open flag; both the title-bar close button and
+    /// the Close button dismiss it.
+    fn show_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let t = self.lang.resolved().strings();
+        let mut open = true;
+        let mut close_clicked = false;
+        egui::Window::new(t.settings_title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(t.language_section).strong());
+                let mut lang = self.lang;
+                ui.radio_value(&mut lang, Language::System, t.language_system);
+                ui.radio_value(&mut lang, Language::Chinese, t.language_chinese);
+                ui.radio_value(&mut lang, Language::English, t.language_english);
+                if lang != self.lang {
+                    self.set_language(lang);
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(t.about_section).strong());
+                ui.label(format!(
+                    "Agent Session Hub · {} {}",
+                    t.version_label,
+                    env!("CARGO_PKG_VERSION")
+                ));
+                ui.label(egui::RichText::new(t.app_description).small().weak());
+                if let Some(path) = i18n::settings_path() {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} {}",
+                            t.settings_file_label,
+                            path.display()
+                        ))
+                        .small()
+                        .weak()
+                        .monospace(),
+                    );
+                }
+                ui.add_space(6.0);
+                if ui.button(t.close).clicked() {
+                    close_clicked = true;
+                }
+            });
+        self.show_settings = open && !close_clicked;
+    }
+
+    // ---------- Left: unified session list ----------
 
     fn show_sidebar(&mut self, ui: &mut egui::Ui) {
+        let t = self.lang.resolved().strings();
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("全部会话").heading());
+            ui.label(egui::RichText::new(t.all_sessions).heading());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("重新扫描").clicked() {
+                if ui.button(t.rescan).clicked() {
                     self.rescan();
                 }
             });
         });
-        // 搜索框:按标题或项目路径即时过滤
+        // Search box: instant filtering by title or project path
         ui.add(
             egui::TextEdit::singleline(&mut self.search_query)
-                .hint_text("搜索标题或路径…")
+                .hint_text(t.search_hint)
                 .desired_width(ui.available_width()),
         );
-        // 来源筛选:一行四项互斥,与搜索叠加(AND)过滤
+        // Source filter: four exclusive entries, combined (AND) with search
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("来源:").small().weak());
-            ui.selectable_value(&mut self.source_filter, SourceFilter::All, "全部");
+            ui.label(egui::RichText::new(t.source_label).small().weak());
+            ui.selectable_value(&mut self.source_filter, SourceFilter::All, t.filter_all);
             ui.selectable_value(
                 &mut self.source_filter,
                 SourceFilter::Source(Tool::ClaudeCode),
@@ -327,7 +467,8 @@ impl HubApp {
                 "ZCode",
             );
         });
-        // 不区分大小写的子串匹配,空输入显示全部;来源筛选与搜索同时生效
+        // Case-insensitive substring match, empty input shows everything;
+        // source filter and search are both active at once
         let query = self.search_query.trim().to_lowercase();
         let visible: Vec<usize> = self
             .entries
@@ -341,7 +482,8 @@ impl HubApp {
             })
             .map(|(i, _)| i)
             .collect();
-        // 选中项被过滤掉时清空选中,右侧回到未选择状态
+        // If the selected session is filtered out, drop the selection and
+        // return the right pane to the unselected state
         if let Some(sel) = self.selected {
             if !visible.contains(&sel) {
                 self.selected = None;
@@ -354,35 +496,28 @@ impl HubApp {
         }
         let filtering = self.source_filter != SourceFilter::All || !query.is_empty();
         let subtitle = if filtering {
-            format!(
-                "共 {} / {} 个会话,按最近活跃排序",
-                visible.len(),
-                self.entries.len()
-            )
+            t.session_count_filtered(visible.len(), self.entries.len())
         } else {
-            format!("共 {} 个会话,按最近活跃排序", self.entries.len())
+            t.session_count(self.entries.len())
         };
         ui.label(egui::RichText::new(subtitle).small().weak());
         ui.add_space(4.0);
 
         if self.entries.is_empty() {
-            // 三家都未发现会话(某家目录/库不存在属正常情况,已静默跳过)
+            // No sessions from any source (a missing directory/database for
+            // one source is normal and was skipped silently)
             ui.add_space(28.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("未发现任何会话").weak().size(15.0));
+                ui.label(egui::RichText::new(t.empty_title).weak().size(15.0));
                 ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("支持自动读取 Claude Code、Codex、ZCode 的本地会话")
-                        .small()
-                        .weak(),
-                );
+                ui.label(egui::RichText::new(t.empty_hint).small().weak());
             });
             return;
         }
         if visible.is_empty() {
             ui.add_space(28.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("没有符合当前条件的会话").weak());
+                ui.label(egui::RichText::new(t.no_match).weak());
             });
             return;
         }
@@ -411,7 +546,8 @@ impl HubApp {
                         });
                     let output = frame.show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        // 首行:标题占满除徽章外的宽度(超长截断),右上角为来源徽章
+                        // First row: title takes all width except the badge
+                        // (truncated when long), source badge top-right
                         let spacing = ui.style().spacing.item_spacing.x;
                         let title_width =
                             (ui.available_width() - BADGE_SIZE.x - spacing).at_least(60.0);
@@ -426,10 +562,9 @@ impl HubApp {
                         ui.add_space(2.0);
                         ui.add(
                             egui::Label::new(
-                                egui::RichText::new(format!(
-                                    "{} · {} 条消息",
-                                    friendly_time(&summary.last_active),
-                                    summary.message_count
+                                egui::RichText::new(t.card_meta(
+                                    &friendly_time(&summary.last_active),
+                                    summary.message_count,
                                 ))
                                 .small()
                                 .weak(),
@@ -461,16 +596,13 @@ impl HubApp {
         }
     }
 
-    // ---------- 右侧:详情 ----------
+    // ---------- Right: detail ----------
 
     fn show_detail(&mut self, ui: &mut egui::Ui) {
+        let t = self.lang.resolved().strings();
         let Some(index) = self.selected else {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("在左侧选择一个会话进行预览")
-                        .weak()
-                        .size(16.0),
-                );
+                ui.label(egui::RichText::new(t.select_hint).weak().size(16.0));
             });
             return;
         };
@@ -480,7 +612,7 @@ impl HubApp {
         let summary = &entry.summary;
         let source = entry.tool;
 
-        // 头部信息:来源徽章 + 标题
+        // Header: source badge + title
         ui.horizontal(|ui| {
             source_badge(ui, source);
             ui.label(egui::RichText::new(&summary.title).heading().strong());
@@ -494,7 +626,7 @@ impl HubApp {
             );
             ui.separator();
             ui.label(
-                egui::RichText::new(format!("{} 条消息", summary.message_count))
+                egui::RichText::new(t.message_count(summary.message_count))
                     .small()
                     .weak(),
             );
@@ -508,11 +640,13 @@ impl HubApp {
         ui.add_space(8.0);
 
         if let Some(err) = &self.detail_error {
-            ui.colored_label(COLOR_ERR_TEXT, format!("读取会话失败:{err}"));
+            // Core error text is displayed verbatim (see i18n module docs).
+            ui.colored_label(COLOR_ERR_TEXT, t.read_session_failed(err));
             return;
         }
 
-        // 先取需要的数据,尽早结束不可变借用(后面按钮区需要 &mut self)
+        // Take the needed data early and end the immutable borrow (the
+        // button area below needs &mut self)
         let (can_migrate, parse_warnings) = match &self.session {
             Some(session) => (
                 session.messages.iter().any(|m| !m.parts.is_empty()),
@@ -524,31 +658,30 @@ impl HubApp {
         if parse_warnings > 0 {
             notice_panel(ui, COLOR_WARN_BUBBLE, COLOR_WARN_TEXT, |ui| {
                 ui.label(
-                    egui::RichText::new(format!(
-                        "源中有 {} 行无法解析,迁移时将跳过(不影响其余内容)",
-                        parse_warnings
-                    ))
-                    .small()
-                    .color(COLOR_WARN_TEXT),
+                    egui::RichText::new(t.source_parse_warning(parse_warnings))
+                        .small()
+                        .color(COLOR_WARN_TEXT),
                 );
             });
             ui.add_space(4.0);
         }
 
-        // 迁移操作区:按钮组按目标分发,排除当前来源(同家迁移无意义,不显示按钮)
+        // Migration action row: one button per target, excluding the current
+        // source (same-source migration is pointless, no button shown)
         ui.horizontal(|ui| {
             for target in [Tool::Codex, Tool::ClaudeCode, Tool::ZCode] {
                 if target == source {
                     continue;
                 }
-                let button =
-                    egui::Button::new(egui::RichText::new(migrate_target_label(target)).strong())
-                        .min_size(egui::vec2(150.0, 30.0));
+                let button = egui::Button::new(
+                    egui::RichText::new(t.migrate_to(tool_display_name(target))).strong(),
+                )
+                .min_size(egui::vec2(150.0, 30.0));
                 let response = ui.add_enabled(can_migrate, button);
                 let response = if can_migrate {
                     response
                 } else {
-                    response.on_disabled_hover_text("该会话没有可迁移的内容")
+                    response.on_disabled_hover_text(t.nothing_to_migrate)
                 };
                 if response.clicked() {
                     self.request_migrate(target);
@@ -563,7 +696,8 @@ impl HubApp {
         ui.separator();
         ui.add_space(6.0);
 
-        // 消息流预览(此处重新借用,不再与按钮区的 &mut self 冲突)
+        // Message-stream preview (borrowed again here, no &mut self conflict
+        // with the button area above)
         let Some(session) = &self.session else {
             return;
         };
@@ -573,8 +707,12 @@ impl HubApp {
                 ui.set_width(ui.available_width());
                 for message in &session.messages {
                     let (role_name, role_color, bubble) = match message.role {
-                        Role::User => ("用户", COLOR_USER_ROLE, COLOR_USER_BUBBLE),
-                        Role::Assistant => ("助手", COLOR_ASSISTANT_ROLE, COLOR_ASSISTANT_BUBBLE),
+                        Role::User => (t.role_user, COLOR_USER_ROLE, COLOR_USER_BUBBLE),
+                        Role::Assistant => (
+                            t.role_assistant,
+                            COLOR_ASSISTANT_ROLE,
+                            COLOR_ASSISTANT_BUBBLE,
+                        ),
                     };
                     egui::Frame::new()
                         .fill(bubble)
@@ -600,6 +738,14 @@ impl HubApp {
                                     UnifiedPart::Reasoning(text) => {
                                         ui.label(egui::RichText::new(text).weak().italics());
                                     }
+                                    // The tool-call/result preview prefixes reuse
+                                    // the writers' Chinese text format
+                                    // byte-for-byte: migrating to Claude/ZCode
+                                    // flattens them into exactly these strings
+                                    // (asserted by hub-core e2e tests), so the
+                                    // preview must keep matching the artifact
+                                    // in every UI language. Only role names are
+                                    // localized.
                                     UnifiedPart::ToolCall { tool, input_json } => {
                                         ui.label(
                                             egui::RichText::new(format!(
@@ -629,30 +775,36 @@ impl HubApp {
             });
     }
 
-    /// 写入前护栏警告面板:目标工具运行中时提示冲突风险;
-    /// 「仍要迁移」由用户确认后放行本次迁移(不重新检测,警告随即清除)。
+    /// Pre-write guardrail warning panel: while the target tool is running,
+    /// show the conflict risk; "Migrate Anyway" lets the user push this one
+    /// migration through (no re-check; the warning clears immediately).
     fn show_run_warning(&mut self, ui: &mut egui::Ui) {
         let Some(warning) = &self.run_warning else {
             return;
         };
-        // 确认动作先落本地变量,面板画完后再变更状态,避免借用冲突
+        let t = self.lang.resolved().strings();
+        // Compose the message from the current language instead of storing
+        // it, so it never goes stale after a language switch.
+        let mut message = t.run_warning(tool_display_name(warning.target));
+        if warning.target == Tool::ZCode {
+            message.push_str(t.run_warning_zcode_extra);
+        }
+        // Land the confirmation in a local first, mutate state only after
+        // the panel is drawn (avoids borrow conflicts)
         let mut confirmed: Option<Tool> = None;
         notice_panel(ui, COLOR_WARN_BUBBLE, COLOR_WARN_TEXT, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new(&warning.message)
-                    .small()
-                    .color(COLOR_WARN_TEXT),
-            );
+            ui.label(egui::RichText::new(&message).small().color(COLOR_WARN_TEXT));
             ui.add_space(2.0);
-            let button = egui::Button::new(egui::RichText::new("仍要迁移").strong())
+            let button = egui::Button::new(egui::RichText::new(t.migrate_anyway).strong())
                 .min_size(egui::vec2(96.0, 24.0));
             if ui.add(button).clicked() {
                 confirmed = Some(warning.target);
             }
         });
         if let Some(target) = confirmed {
-            // 用户已知晓风险:清警告并立即执行本次迁移
+            // The user accepted the risk: clear the warning and run this
+            // migration immediately
             self.run_warning = None;
             self.do_migrate(target);
         }
@@ -662,33 +814,34 @@ impl HubApp {
         let Some(result) = &self.migration else {
             return;
         };
+        let t = self.lang.resolved().strings();
         match result {
             Ok(ok) => {
-                // 一键打开的失败提示:进闭包前拷出历史值,按钮结果先落本地,
-                // 面板画完后再统一写回(成功清除、失败记录原因,并在本帧立即显示)
+                // One-click-open error: clone the previous value before the
+                // closure, land button results in locals first, then write
+                // everything back after the panel (success clears it,
+                // failure records the reason and shows it this same frame)
                 let mut launch_error = self.launch_error.clone();
                 notice_panel(ui, COLOR_OK_BUBBLE, COLOR_OK_TEXT, |ui| {
                     ui.set_width(ui.available_width());
                     ui.label(
-                        egui::RichText::new("迁移成功")
+                        egui::RichText::new(t.migrate_ok_title)
                             .strong()
                             .color(COLOR_OK_TEXT),
                     );
                     if ok.parse_warnings > 0 {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "已跳过 {} 行无法解析的源内容",
-                                ok.parse_warnings
-                            ))
-                            .small()
-                            .color(COLOR_OK_TEXT),
+                            egui::RichText::new(t.skipped_lines(ok.parse_warnings))
+                                .small()
+                                .color(COLOR_OK_TEXT),
                         );
                     }
                     if ok.target != Tool::ZCode {
-                        // Codex / Claude 目标:在终端执行命令继续会话
+                        // Codex / Claude targets: run the command in a
+                        // terminal to continue the session
                         if let Some(command) = ok.resume_command.as_deref() {
                             ui.label(
-                                egui::RichText::new("在终端执行以下命令,继续这个会话:")
+                                egui::RichText::new(t.terminal_cmd_hint)
                                     .small()
                                     .color(COLOR_OK_TEXT),
                             );
@@ -704,52 +857,47 @@ impl HubApp {
                                             .truncate(),
                                     );
                                 });
-                            // 主按钮:一键在 Terminal 中打开;副按钮:复制命令兜底
+                            // Primary button: open in Terminal with one
+                            // click; secondary: copy the command as fallback
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                let open_button =
-                                    egui::Button::new(egui::RichText::new("在终端中打开").strong())
-                                        .min_size(egui::vec2(132.0, 26.0));
+                                let open_button = egui::Button::new(
+                                    egui::RichText::new(t.open_in_terminal).strong(),
+                                )
+                                .min_size(egui::vec2(132.0, 26.0));
                                 if ui.add(open_button).clicked() {
                                     match open_in_terminal(command) {
                                         Ok(()) => launch_error = None,
                                         Err(e) => launch_error = Some(e.to_string()),
                                     }
                                 }
-                                if ui.button("复制命令").clicked() {
+                                if ui.button(t.copy_command).clicked() {
                                     ui.ctx().copy_text(command.to_string());
                                 }
                             });
                             if let Some(err) = &launch_error {
-                                ui.colored_label(
-                                    COLOR_ERR_TEXT,
-                                    format!(
-                                        "在终端中打开失败:{err}。请复制上方命令到终端手动执行。"
-                                    ),
-                                );
+                                ui.colored_label(COLOR_ERR_TEXT, t.open_terminal_failed(err));
                             }
                         }
                         if let Some(path) = ok.file_path.as_deref() {
                             ui.label(
-                                egui::RichText::new(format!("产物文件:{path}"))
+                                egui::RichText::new(t.output_file(path))
                                     .small()
                                     .weak()
                                     .monospace(),
                             );
                         }
                     } else {
-                        // ZCode 目标:桌面应用无终端命令,给出打开指引与一键启动
+                        // ZCode target: desktop app without a terminal
+                        // command, show open-app guidance plus one-click launch
                         ui.label(
-                            egui::RichText::new(format!(
-                                "迁移完成,打开 ZCode 应用即可在任务列表中看到(会话标题:{})",
-                                ok.title
-                            ))
-                            .small()
-                            .color(COLOR_OK_TEXT),
+                            egui::RichText::new(t.zcode_success_hint(&ok.title))
+                                .small()
+                                .color(COLOR_OK_TEXT),
                         );
                         ui.add_space(4.0);
                         let open_button =
-                            egui::Button::new(egui::RichText::new("打开 ZCode").strong())
+                            egui::Button::new(egui::RichText::new(t.open_zcode).strong())
                                 .min_size(egui::vec2(132.0, 26.0));
                         if ui.add(open_button).clicked() {
                             match open_zcode_app() {
@@ -758,15 +906,10 @@ impl HubApp {
                             }
                         }
                         if let Some(err) = &launch_error {
-                            ui.colored_label(
-                                COLOR_ERR_TEXT,
-                                format!(
-                                    "打开 ZCode 失败:{err}。请手动启动 ZCode 应用查看迁移结果。"
-                                ),
-                            );
+                            ui.colored_label(COLOR_ERR_TEXT, t.open_zcode_failed(err));
                         }
                         ui.label(
-                            egui::RichText::new(format!("session id:{}", ok.session_id))
+                            egui::RichText::new(t.session_id(&ok.session_id))
                                 .small()
                                 .weak()
                                 .monospace(),
@@ -776,15 +919,16 @@ impl HubApp {
                 self.launch_error = launch_error;
             }
             Err(err) => {
-                ui.colored_label(COLOR_ERR_TEXT, format!("迁移失败:{err}"));
+                // Core error text is displayed verbatim (see i18n docs).
+                ui.colored_label(COLOR_ERR_TEXT, t.migrate_failed(err));
             }
         }
     }
 }
 
-// ---------- 小组件 ----------
+// ---------- Small widgets ----------
 
-/// 提示条面板(成功/警告等)。
+/// Notice panel (success / warning and similar).
 fn notice_panel(
     ui: &mut egui::Ui,
     bg: egui::Color32,
@@ -798,8 +942,9 @@ fn notice_panel(
         .show(ui, content);
 }
 
-/// 卡片 / 详情头部的来源徽章:固定尺寸着色小标签,白字居中。
-/// 直接用 painter 绘制,宽度确定,便于标题按「剩余宽度截断」排布。
+/// Source badge on cards / detail header: a fixed-size colored chip with
+/// centered white text. Drawn with the painter directly so the width is
+/// known, letting the title truncate against "remaining width".
 fn source_badge(ui: &mut egui::Ui, tool: Tool) {
     let (text, color) = match tool {
         Tool::ClaudeCode => ("Claude", COLOR_BADGE_CLAUDE),
@@ -818,16 +963,8 @@ fn source_badge(ui: &mut egui::Ui, tool: Tool) {
     );
 }
 
-/// 迁移按钮文案(按目标工具)。
-fn migrate_target_label(tool: Tool) -> &'static str {
-    match tool {
-        Tool::ClaudeCode => "迁移到 Claude  →",
-        Tool::Codex => "迁移到 Codex  →",
-        Tool::ZCode => "迁移到 ZCode  →",
-    }
-}
-
-/// 工具在界面文案中的短名(警告提示等使用,与徽章文案一致)。
+/// Short tool name for UI text (warnings etc.), matching the badge text.
+/// Language-neutral product name, not translated.
 fn tool_display_name(tool: Tool) -> &'static str {
     match tool {
         Tool::ClaudeCode => "Claude",
@@ -836,20 +973,7 @@ fn tool_display_name(tool: Tool) -> &'static str {
     }
 }
 
-/// 写入前护栏的警告文案:目标工具运行中的冲突提示;
-/// ZCode 的库是 SQLite 双库,运行中写入有数据损坏风险,额外加强提醒。
-fn run_warning_message(target: Tool) -> String {
-    let name = tool_display_name(target);
-    let mut message = format!(
-        "检测到 {name} 正在运行,迁移写入可能与它冲突。请先退出 {name},或点击「仍要迁移」继续。"
-    );
-    if target == Tool::ZCode {
-        message.push_str("ZCode 运行中写入有数据损坏风险,强烈建议先退出。");
-    }
-    message
-}
-
-/// RFC3339 时间戳显示为 "MM-DD HH:MM"(解析失败则原样返回)。
+/// Render an RFC3339 timestamp as "MM-DD HH:MM" (raw text if parsing fails).
 fn friendly_time(rfc3339: &str) -> String {
     if rfc3339.len() >= 16 {
         rfc3339[5..16].replace('T', " ")
@@ -858,18 +982,24 @@ fn friendly_time(rfc3339: &str) -> String {
     }
 }
 
-// ---------- 字体 ----------
+// ---------- Fonts ----------
 
-/// 加载 CJK 字体,保证中英文在同一基线。
+/// Load a CJK font so Chinese and Latin text share one baseline.
 ///
-/// 关键点:把 CJK 字体插入 Proportional 家族**最前面**,拉丁字符同样由它渲染——
-/// 单一字体内部的中西文 metrics 天然对齐;若拉丁走内置字体、中文走回退字体,
-/// 两套字体的行高差异会让同一行文字高低错落。
-/// Monospace 家族保持内置等宽字体在前,CJK 追加在末尾(等宽内容仍对齐,中文可回落)。
+/// Key point: the CJK font is inserted at the **front** of the
+/// Proportional family, so Latin glyphs are rendered by it as well —
+/// metrics within a single font align naturally. If Latin text went
+/// through the built-in font while Chinese fell back to another family,
+/// the differing line heights of the two fonts would make mixed text
+/// wobble. The Monospace family keeps the built-in monospace font first
+/// and appends the CJK font at the end (monospace content stays aligned,
+/// Chinese still has a fallback).
 ///
-/// 候选:已知含简体中文的系统字体(按优先级),全部缺失时扫描用户字体目录。
-/// 不做用户目录扫描优先,因为用户目录常见纯拉丁等宽字体(如 JetBrains Mono),
-/// 先命中它会导致中文显示为方框。
+/// Candidates: known system fonts with Simplified Chinese (in priority
+/// order); if all are missing, the user font directories are scanned.
+/// User directories are NOT scanned first because they commonly hold pure
+/// Latin monospace fonts (e.g. JetBrains Mono); matching one of those
+/// first would render Chinese as boxes.
 fn install_cjk_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
@@ -910,13 +1040,14 @@ fn install_cjk_fonts(ctx: &egui::Context) {
         fonts
             .font_data
             .insert(name.clone(), egui::FontData::from_owned(bytes).into());
-        // Proportional:插入最前,中西文同字体 → 同基线
+        // Proportional: insert at the front, one font for CJK+Latin -> one
+        // baseline
         fonts
             .families
             .entry(egui::FontFamily::Proportional)
             .or_default()
             .insert(0, name.clone());
-        // Monospace:等宽字体保持在前,中文末尾回落
+        // Monospace: monospace font stays first, CJK appended as fallback
         fonts
             .families
             .entry(egui::FontFamily::Monospace)

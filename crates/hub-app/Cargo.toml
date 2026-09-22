@@ -7,3 +7,5 @@ edition.workspace = true
 hub-core = { path = "../hub-core" }
 egui.workspace = true
 eframe.workspace = true
+# Already a workspace dependency (via hub-core); used for settings.json.
+serde_json.workspace = true

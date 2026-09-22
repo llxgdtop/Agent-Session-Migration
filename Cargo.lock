@@ -1437,6 +1437,7 @@ dependencies = [
  "eframe",
  "egui",
  "hub-core",
+ "serde_json",
 ]
 
 [[package]]
