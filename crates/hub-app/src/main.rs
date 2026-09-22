@@ -53,6 +53,7 @@ struct HubApp {
     codex_root: PathBuf,
     summaries: Vec<SessionSummary>,
     scan_error: Option<String>,
+    search_query: String,
     selected: Option<usize>,
     session: Option<UnifiedSession>,
     detail_error: Option<String>,
@@ -67,6 +68,7 @@ impl HubApp {
             codex_root: home.join(".codex").join("sessions"),
             summaries: Vec::new(),
             scan_error: None,
+            search_query: String::new(),
             selected: None,
             session: None,
             detail_error: None,
@@ -152,11 +154,44 @@ impl HubApp {
                 }
             });
         });
-        ui.label(
-            egui::RichText::new(format!("共 {} 个会话,按最近活跃排序", self.summaries.len()))
-                .small()
-                .weak(),
+        // 搜索框:按标题或项目路径即时过滤
+        ui.add(
+            egui::TextEdit::singleline(&mut self.search_query)
+                .hint_text("搜索标题或路径…")
+                .desired_width(ui.available_width()),
         );
+        // 不区分大小写的子串匹配,空输入显示全部
+        let query = self.search_query.trim().to_lowercase();
+        let visible: Vec<usize> = self
+            .summaries
+            .iter()
+            .enumerate()
+            .filter(|(_, summary)| {
+                query.is_empty()
+                    || summary.title.to_lowercase().contains(&query)
+                    || summary.project_dir.to_lowercase().contains(&query)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // 选中项被过滤掉时清空选中,右侧回到未选择状态
+        if let Some(sel) = self.selected {
+            if !visible.contains(&sel) {
+                self.selected = None;
+                self.session = None;
+                self.detail_error = None;
+                self.migration = None;
+            }
+        }
+        let subtitle = if query.is_empty() {
+            format!("共 {} 个会话,按最近活跃排序", self.summaries.len())
+        } else {
+            format!(
+                "共 {} / {} 个会话,按最近活跃排序",
+                visible.len(),
+                self.summaries.len()
+            )
+        };
+        ui.label(egui::RichText::new(subtitle).small().weak());
         ui.add_space(4.0);
 
         if let Some(err) = &self.scan_error {
@@ -183,7 +218,8 @@ impl HubApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for (i, summary) in self.summaries.iter().enumerate() {
+                for &i in &visible {
+                    let summary = &self.summaries[i];
                     let selected = self.selected == Some(i);
                     let bg = if selected {
                         ui.visuals().selection.bg_fill
