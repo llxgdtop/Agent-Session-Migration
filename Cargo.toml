@@ -2,6 +2,15 @@
 resolver = "2"
 members = ["crates/hub-core", "crates/hub-app"]
 
+# Release tuning for the shipped desktop app: strip symbols, thin-LTO,
+# single codegen unit and no unwind tables. `cargo test` is unaffected
+# (the test profile inherits from dev, not release).
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
