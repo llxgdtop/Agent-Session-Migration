@@ -391,12 +391,16 @@ impl Strings {
 
 // ---------- Settings persistence ----------
 
-/// Path of the persisted settings file (`None` when `HOME` is unset).
+/// Path of the persisted settings file (`None` when no home directory is
+/// resolvable). Uses $HOME on unix and %USERPROFILE% on Windows.
 pub fn settings_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        let home = PathBuf::from(home);
-        home.join(".agent-session-hub").join("settings.json")
-    })
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".agent-session-hub")
+                .join("settings.json")
+        })
 }
 
 /// Load the language preference; a missing file, unreadable JSON or an

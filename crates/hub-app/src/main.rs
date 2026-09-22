@@ -152,9 +152,17 @@ struct HubApp {
     show_settings: bool,
 }
 
+/// Cross-platform home directory: $HOME on unix, %USERPROFILE% on Windows.
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
 impl HubApp {
     fn new() -> Self {
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+        let home = home_dir();
         let zcode_root = home.join(".zcode");
         let mut app = HubApp {
             claude_root: home.join(".claude").join("projects"),
@@ -1003,31 +1011,9 @@ fn friendly_time(rfc3339: &str) -> String {
 fn install_cjk_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    #[cfg(target_os = "macos")]
-    let known_cjk_fonts = [
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Hiragino Sans GB.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Supplemental/Songti.ttc",
-    ];
-    #[cfg(not(target_os = "macos"))]
-    let known_cjk_fonts: [&str; 0] = [];
-
-    let mut candidates: Vec<PathBuf> = known_cjk_fonts.iter().map(PathBuf::from).collect();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        for dir in [home.join("Library/Fonts"), home.join(".fonts")] {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                candidates.extend(entries.flatten().map(|e| e.path()).filter(|p| {
-                    p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| matches!(e, "ttf" | "ttc" | "otf"))
-                        .unwrap_or(false)
-                }));
-            }
-        }
-    }
+    // Platform-aware candidates (whitelist first, user dirs appended) come
+    // from the core library so every OS shares one tested ordering.
+    let candidates = hub_core::cjk_font_candidates();
 
     for path in candidates {
         let Ok(bytes) = std::fs::read(&path) else {
