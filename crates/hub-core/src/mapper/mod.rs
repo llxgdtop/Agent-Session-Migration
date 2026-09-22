@@ -1,9 +1,9 @@
-//! IR → Codex rollout 事件映射。
+//! IR → Codex rollout event mapping.
 
 use crate::error::HubError;
 use crate::ir::{Role, UnifiedPart, UnifiedSession};
 
-/// 与目标 rollout JSONL 行一一对应的中间事件。
+/// Intermediate event corresponding one-to-one with a target rollout JSONL line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexEvent {
     SessionMeta {
@@ -26,19 +26,22 @@ pub enum CodexEvent {
     },
 }
 
-/// 按 Unicode 标量(char)截断的阈值。
+/// Truncation thresholds counted in Unicode scalars (chars).
 const REASONING_MAX_CHARS: usize = 1000;
 const TOOL_INPUT_MAX_CHARS: usize = 500;
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 const ELLIPSIS: &str = "…";
 
-/// IR → 事件序列。
+/// IR → event sequence.
 ///
-/// - session_id 与 meta_timestamp 由调用方(write_session_with 从 IdGen 取得)传入,
-///   保证文件名 uuid == session_meta.id;
-/// - 空 parts 消息与合并后文本为空的消息丢弃;全部被丢弃时报 EmptySession;
-/// - user 消息的 response_item 与 user_message event 恰好成对产出,writer 不派生任何事件;
-/// - 消息 timestamp 缺失时用 meta_timestamp 兜底。
+/// - session_id and meta_timestamp are supplied by the caller
+///   (write_session_with takes them from the IdGen), guaranteeing
+///   filename uuid == session_meta.id;
+/// - messages with empty parts, or whose merged text is empty, are dropped;
+///   if everything is dropped, EmptySession is returned;
+/// - a user message yields exactly one response_item plus one user_message
+///   event; the writer derives no events on its own;
+/// - a missing message timestamp falls back to meta_timestamp.
 pub fn map_session(
     ir: &UnifiedSession,
     session_id: &str,
@@ -65,11 +68,11 @@ pub fn map_session(
     let mut emitted = 0usize;
     for message in &ir.messages {
         if message.parts.is_empty() {
-            continue; //
+            continue;
         }
         let text = render_parts(&message.parts);
         if text.is_empty() {
-            continue; // 合并后为空同样丢弃
+            continue; // empty after merging: drop as well
         }
         let timestamp = message
             .timestamp
@@ -90,16 +93,19 @@ pub fn map_session(
     }
 
     if emitted == 0 {
-        return Err(empty_session()); // /极端:map 后无任何消息事件
+        return Err(empty_session()); // degenerate case: no message events survived mapping
     }
     Ok(events)
 }
 
-/// 按 把同一消息的 parts 顺序拼接为单一文本:
-/// thinking → "> 内部推理:<t>\n\n"、text → 原文、
-/// tool_use → "[调用工具 <name>] <input_json>"、tool_result → "[工具结果 <tool> isError=<b>] <content>"。
-/// 截断阈值:reasoning 1000 / tool input 500 / tool result 2000 char,追加 "…"。
-/// (writer::claude 对 Claude Code 目标复用同一合并规则,故对 crate 内可见。)
+/// Concatenate the parts of one message, in order, into a single text:
+/// thinking → "> 内部推理:<t>\n\n", text → verbatim,
+/// tool_use → "[调用工具 <name>] <input_json>",
+/// tool_result → "[工具结果 <tool> isError=<b>] <content>".
+/// Truncation thresholds: reasoning 1000 / tool input 500 / tool result 2000
+/// chars, with "…" appended.
+/// (writer::claude reuses the same merging rules for the Claude Code target,
+/// hence crate-visible.)
 pub(crate) fn render_parts(parts: &[UnifiedPart]) -> String {
     let mut out = String::new();
     for part in parts {
@@ -131,7 +137,7 @@ pub(crate) fn render_parts(parts: &[UnifiedPart]) -> String {
     out
 }
 
-/// 按 char 截断;超长时追加省略号。
+/// Truncate by chars; append an ellipsis when the text is too long.
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() > max {
         let mut cut: String = text.chars().take(max).collect();
@@ -306,7 +312,8 @@ mod tests {
             Err(HubError::EmptySession(_))
         ));
 
-        // 极端:消息存在但全部为空 parts(或合并后为空)同样拒绝
+        // Degenerate case: messages exist but all have empty parts (or merge
+        // to empty) — rejected just the same
         let ir_all_empty = ir_with(vec![
             msg(Role::Assistant, vec![]),
             msg(Role::User, vec![UnifiedPart::Text(String::new())]),
@@ -374,13 +381,14 @@ mod tests {
         else {
             panic!("expected Message event");
         };
-        // reasoning 截 1000 char + "…",后接 "\n\n" 与 tool call
+        // reasoning truncated to 1000 chars + "…", followed by "\n\n" and the
+        // tool call
         assert!(assistant_text.starts_with("> 内部推理:"));
         assert!(assistant_text.contains("…\n\n[调用工具 Bash] "));
         let reasoning_part: String = std::iter::repeat_n('思', 1000).collect();
         assert!(assistant_text.contains(&reasoning_part));
         assert!(!assistant_text.contains(&(reasoning_part.clone() + "思")));
-        // input_json 截 500 char + "…"
+        // input_json truncated to 500 chars + "…"
         let input_500: String = std::iter::repeat_n('x', 500).collect();
         assert!(assistant_text.ends_with(&format!("[调用工具 Bash] {input_500}…")));
         assert_eq!(assistant_text.chars().filter(|c| *c == '…').count(), 2);
@@ -391,14 +399,14 @@ mod tests {
         else {
             panic!("expected Message event");
         };
-        // tool_result content 截 2000 char + "…"
+        // tool_result content truncated to 2000 chars + "…"
         assert!(user_text.starts_with("[工具结果 Bash isError=false] "));
         let body = user_text.trim_start_matches("[工具结果 Bash isError=false] ");
-        assert_eq!(body.chars().count(), 2001); // 2000 + 省略号
+        assert_eq!(body.chars().count(), 2001); // 2000 + ellipsis
         assert!(body.ends_with('…'));
     }
 
-    /// 消息 timestamp 缺失时以 meta_timestamp 兜底。
+    /// A missing message timestamp falls back to meta_timestamp.
     #[test]
     fn tc_map_07_missing_timestamp_falls_back_to_meta() {
         let ir = ir_with(vec![UnifiedMessage {

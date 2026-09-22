@@ -1,8 +1,11 @@
-//! Claude Code 会话 JSONL 写入。
+//! Claude Code session JSONL writing.
 //!
-//! 行为:IR 消息逐条渲染 → 写 `<target>/<project 转义目录>/<新 uuid>.jsonl.tmp`
-//! → rename 原子落盘;目标已存在报 TargetExists;全部消息为空报 EmptySession。
-//! 极简两行(user + assistant)即可被 `claude --resume` 载入——已真机验证。
+//! Behavior: render IR messages one by one → write
+//! `<target>/<escaped project dir>/<new uuid>.jsonl.tmp` → rename for an
+//! atomic commit; TargetExists when the target already exists; EmptySession
+//! when every message is empty.
+//! A minimal two lines (user + assistant) is enough for `claude --resume` to
+//! load the session — verified on a real device.
 
 use std::fs;
 use std::io;
@@ -15,9 +18,10 @@ use crate::ir::{Role, UnifiedSession};
 use crate::mapper::render_parts;
 use crate::writer::codex::{IdGen, SystemIdGen};
 
-/// 目标 Claude Code 版本号(写入行内 version 字段,与真机产物一致)。
+/// Target Claude Code version (written into the inline version field,
+/// matching real-device artifacts).
 const CLI_VERSION: &str = "2.1.212";
-/// 行内 userType 固定值:外部用户真实会话。
+/// Fixed inline userType value: a real session from an external user.
 const USER_TYPE: &str = "external";
 
 #[derive(Debug)]
@@ -27,7 +31,8 @@ pub struct ClaudeWriteOutput {
     pub resume_command: String,
 }
 
-/// 便捷入口:系统时刻与随机 uuid。确定性测试请用 [`write_session_with`]。
+/// Convenience entry point: system time and random uuid. Use
+/// [`write_session_with`] for deterministic tests.
 pub fn write_session(
     ir: &UnifiedSession,
     target_root: &Path,
@@ -35,7 +40,8 @@ pub fn write_session(
     write_session_with(ir, target_root, &SystemIdGen)
 }
 
-/// 注入 IdGen 的写入入口:会话 uuid、逐消息 uuid 与缺失 timestamp 由 gen 提供。
+/// Write entry point with an injected IdGen: the session uuid, per-message
+/// uuids, and fallback timestamps come from gen.
 pub fn write_session_with(
     ir: &UnifiedSession,
     target_root: &Path,
@@ -44,8 +50,9 @@ pub fn write_session_with(
     let session_id = gen.uuid_v4();
     let now_ts = gen.now_rfc3339_colon();
 
-    // 逐消息渲染;空 parts 或合并后文本为空的消息跳过;
-    // uuid 按实际落盘顺序分配,parentUuid 指向前一条落盘消息(首条为 null)
+    // Render message by message; messages with empty parts or empty merged
+    // text are skipped; uuids are allocated in actual on-disk order, and
+    // parentUuid points at the previous persisted message (null for the first)
     let mut lines = Vec::new();
     let mut parent_uuid: Option<String> = None;
     for message in &ir.messages {
@@ -73,10 +80,10 @@ pub fn write_session_with(
         return Err(HubError::EmptySession(ir.summary.source_path.clone()));
     }
 
-    // 目标:<root>/<project_dir 斜线转连字符>/<session uuid>.jsonl
+    // Target: <root>/<project_dir slashes → hyphens>/<session uuid>.jsonl
     let dir = target_root.join(escape_project_dir(&ir.summary.project_dir));
     let target = dir.join(format!("{session_id}.jsonl"));
-    // 幂等键 = 目标文件路径,已存在即拒绝
+    // Idempotency key = target file path; refuse when it already exists
     if target.exists() {
         return Err(HubError::TargetExists(target));
     }
@@ -87,7 +94,8 @@ pub fn write_session_with(
     let mut body = lines.join("\n");
     body.push('\n');
 
-    // 写 .tmp 成功后 rename;rename 前任何失败都清理 tmp,无部分写入状态
+    // Write the .tmp then rename; any failure before the rename cleans up the
+    // tmp — no partially-written state is ever left behind
     let tmp = dir.join(format!("{session_id}.jsonl.tmp"));
     if let Err(e) = fs::write(&tmp, body.as_bytes()) {
         let _ = fs::remove_file(&tmp);
@@ -101,7 +109,8 @@ pub fn write_session_with(
         return Err(HubError::Io(e));
     }
 
-    // project_dir 来自源会话(外部可控),命令生成层的单引号防护在此生效
+    // project_dir comes from the source session (externally controllable);
+    // the single-quote hardening in the command-generation layer kicks in here
     let resume_command =
         crate::launcher::claude_resume_command(&session_id, &ir.summary.project_dir);
     Ok(ClaudeWriteOutput {
@@ -111,14 +120,18 @@ pub fn write_session_with(
     })
 }
 
-/// Claude Code 的 project 目录名规则:路径中所有斜线转为连字符。
-/// (project_dir 仅作目录名与行内 cwd 数据字段,不进 shell;单引号对文件系统安全。)
+/// Claude Code project directory-name rule: every slash in the path becomes
+/// a hyphen.
+/// (project_dir is only used as a directory name and as the inline cwd data
+/// field — it never reaches a shell; single quotes are safe for the file
+/// system.)
 fn escape_project_dir(project_dir: &str) -> String {
     project_dir.replace('/', "-")
 }
 
-/// 单条消息 → 一行 JSON。user 的 content 为字符串形态,
-/// assistant 的 content 为 [{"type":"text","text": 合并文本}] 数组形态。
+/// One message → one JSON line. user content takes the string form;
+/// assistant content takes the array form
+/// [{"type":"text","text": merged text}].
 fn serialize_line(
     parent_uuid: Option<&str>,
     role: Role,
@@ -178,7 +191,8 @@ struct WireMessage<'a> {
     content: WireContent<'a>,
 }
 
-/// content 两种形态:user 为纯字符串,assistant 为 text 块数组。
+/// The two content shapes: a plain string for user, an array of text blocks
+/// for assistant.
 #[derive(Serialize)]
 #[serde(untagged)]
 enum WireContent<'a> {
@@ -203,7 +217,8 @@ mod tests {
 
     const FIXED_TS_COLON: &str = "2026-09-11T00:00:00.000Z";
 
-    /// uuid 递增:第 1 个给会话,其后逐消息;时间恒定。
+    /// Incrementing uuids: the 1st goes to the session, then one per message;
+    /// time is constant.
     struct CountingIdGen {
         counter: AtomicUsize,
     }
@@ -228,12 +243,12 @@ mod tests {
         }
         fn uuid_v4(&self) -> String {
             let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
-            format!("00000000-0000-4000-8000-{n:012}", n = n)
+            format!("00000000-0000-4000-8000-{n:012}")
         }
     }
 
     fn uuid(n: usize) -> String {
-        format!("00000000-0000-4000-8000-{n:012}", n = n)
+        format!("00000000-0000-4000-8000-{n:012}")
     }
 
     fn ir_with(project_dir: &str, messages: Vec<UnifiedMessage>) -> UnifiedSession {
@@ -269,8 +284,8 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-01 ----------
-    /// 路径转义、行 schema、uuid/parentUuid 链、user 字符串与 assistant 数组两种
-    /// content 形态、resume 命令。
+    /// Path escaping, line schema, uuid/parentUuid chain, the two content
+    /// forms (user string vs assistant array), and the resume command.
     #[test]
     fn tc_cwrite_01_path_schema_chain_and_content_forms() {
         let tmp = tempfile::tempdir().unwrap();
@@ -291,7 +306,7 @@ mod tests {
         );
         let out = write_session_with(&ir, tmp.path(), &CountingIdGen::new()).unwrap();
 
-        // 路径:斜线转连字符;文件名 = 会话新 uuid
+        // Path: slashes → hyphens; file name = the session's new uuid
         let expected = tmp
             .path()
             .join("-Users-x-proj")
@@ -318,7 +333,7 @@ mod tests {
         assert_eq!(first["uuid"], uuid(2));
         assert_eq!(first["timestamp"], "2026-09-10T10:00:00.000Z");
         assert_eq!(first["message"]["role"], "user");
-        // user content 为字符串形态
+        // user content takes the string form
         assert_eq!(first["message"]["content"], "问题一");
 
         let second = &values[1];
@@ -327,7 +342,7 @@ mod tests {
         assert_eq!(second["uuid"], uuid(3));
         assert_eq!(second["sessionId"], uuid(1));
         assert_eq!(second["timestamp"], "2026-09-10T10:00:05.000Z");
-        // assistant content 为数组形态
+        // assistant content takes the array form
         assert_eq!(
             second["message"]["content"],
             serde_json::json!([{"type": "text", "text": "回答一"}])
@@ -335,7 +350,8 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-02 ----------
-    /// 合并规则与 mapper 一致:reasoning 前缀、工具调用/结果文本化。
+    /// Merging rules match the mapper: reasoning prefix, textualized tool
+    /// calls/results.
     #[test]
     fn tc_cwrite_02_merge_rules_match_mapper() {
         let tmp = tempfile::tempdir().unwrap();
@@ -371,7 +387,7 @@ mod tests {
             values[0]["message"]["content"][0]["text"],
             "> 内部推理:想一想\n\n[调用工具 Bash] {\"command\":\"ls\"}"
         );
-        // 工具结果落在 user 行,字符串形态
+        // The tool result lands on a user line, in string form
         assert_eq!(
             values[1]["message"]["content"],
             "[工具结果 Bash isError=true] done"
@@ -379,7 +395,8 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-03 ----------
-    /// 幂等:目标已存在报 TargetExists,且原文件逐字节不变。
+    /// Idempotency: an existing target reports TargetExists, and the original
+    /// file stays byte-for-byte identical.
     #[test]
     fn tc_cwrite_03_target_exists_and_bytes_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
@@ -402,13 +419,14 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-04 ----------
-    /// 原子写:无 .tmp 残留;与目标同名的既有垃圾 .tmp 被覆盖后随 rename 消失。
+    /// Atomic write: no .tmp residue; a pre-existing garbage .tmp with the
+    /// target's name is overwritten and disappears with the rename.
     #[test]
     fn tc_cwrite_04_atomic_no_tmp_residue() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("-tmp-p");
         fs::create_dir_all(&dir).unwrap();
-        // 预置与目标 tmp 同名的垃圾文件
+        // Pre-plant a garbage file with the same name as the target tmp
         let garbage = dir.join(format!("{}.jsonl.tmp", uuid(1)));
         fs::write(&garbage, "garbage").unwrap();
 
@@ -432,8 +450,9 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-05 ----------
-    /// 注入防护:project_dir 含单引号时 resume 命令降级(放弃 cd 段),
-    /// 目录转义照常(引号对文件系统安全)。
+    /// Injection hardening: a project_dir containing a single quote degrades
+    /// the resume command (the cd segment is dropped), while directory
+    /// escaping proceeds as usual (quotes are safe for the file system).
     #[test]
     fn tc_cwrite_05_quoted_project_dir_degrades_resume_command() {
         let tmp = tempfile::tempdir().unwrap();
@@ -446,19 +465,21 @@ mod tests {
             )],
         );
         let out = write_session_with(&ir, tmp.path(), &CountingIdGen::new()).unwrap();
-        // cd 段被放弃,session_id 为生成的 uuid,天然安全
+        // The cd segment is dropped; the session_id is a generated uuid and
+        // inherently safe
         assert_eq!(out.resume_command, format!("claude --resume {}", uuid(1)));
-        // 行内 cwd 仍保留原始路径(数据字段,不进 shell)
+        // The inline cwd keeps the original path (a data field, never reaches
+        // a shell)
         let values = lines_of(&out.file_path);
         assert_eq!(values[0]["cwd"], "/tmp/x'; rm -rf ~");
-        // 文件落在转义目录下
+        // The file lands under the escaped directory
         assert!(out
             .file_path
             .starts_with(tmp.path().join("-tmp-x'; rm -rf ~")));
     }
 
     // ---------- TC-CWRITE-06 ----------
-    /// 空会话 / 全部消息合并后为空 → EmptySession。
+    /// Empty session / all messages empty after merging → EmptySession.
     #[test]
     fn tc_cwrite_06_empty_session_rejected() {
         let tmp = tempfile::tempdir().unwrap();
@@ -481,7 +502,8 @@ mod tests {
         ));
     }
 
-    /// 空消息被跳过,其余消息的 parentUuid 链不断裂。
+    /// Blank messages are dropped; the remaining messages' parentUuid chain
+    /// stays intact.
     #[test]
     fn tc_cwrite_06_blank_message_dropped_chain_intact() {
         let tmp = tempfile::tempdir().unwrap();
@@ -506,7 +528,8 @@ mod tests {
     }
 
     // ---------- TC-CWRITE-07 ----------
-    /// 消息 timestamp 缺失时用生成时刻(IdGen 提供)兜底。
+    /// A missing message timestamp falls back to the generation time
+    /// (supplied by the IdGen).
     #[test]
     fn tc_cwrite_07_missing_timestamp_falls_back_to_now() {
         let tmp = tempfile::tempdir().unwrap();

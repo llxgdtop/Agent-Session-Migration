@@ -1,6 +1,8 @@
-//! 端到端集成测试:Codex → Claude Code 反向迁移全链路。
+//! End-to-end integration tests: the full Codex → Claude Code reverse
+//! migration pipeline.
 //!
-//! fixture 全部在 tempdir 内手写构造,不拷贝任何真实 ~/.codex / ~/.claude 数据。
+//! All fixtures are hand-built inside tempdirs; no real ~/.codex / ~/.claude
+//! data is copied.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,8 @@ use serde_json::Value;
 
 const FIXED_TS_COLON: &str = "2026-09-11T00:00:00.000Z";
 
-/// uuid 递增:第 1 个给会话,其后逐消息;时间恒定。
+/// Incrementing uuids: the 1st goes to the session, then one per message;
+/// time is constant.
 struct CountingIdGen {
     counter: AtomicUsize,
 }
@@ -36,8 +39,9 @@ fn uuid(n: usize) -> String {
     format!("00000000-0000-4000-8000-{n:012}")
 }
 
-/// 手写一份典型 Codex rollout:meta + turn_context + user 消息 + 加密 reasoning
-/// (应丢弃)+ function_call + function_call_output + assistant 消息 + event_msg + 坏行。
+/// Hand-write a typical Codex rollout: meta + turn_context + user message +
+/// encrypted reasoning (must be dropped) + function_call +
+/// function_call_output + assistant message + event_msg + a bad line.
 fn write_codex_fixture(root: &Path) -> PathBuf {
     let path = root
         .join("2026/09/10")
@@ -58,7 +62,7 @@ fn write_codex_fixture(root: &Path) -> PathBuf {
     path
 }
 
-// ---------- TC-CE2E-01:read codex → write claude 逐行断言 ----------
+// ---------- TC-CE2E-01: read codex → write claude, line-by-line assertions ----------
 
 #[test]
 fn tc_ce2e_01_codex_to_claude_full_pipeline() {
@@ -81,7 +85,7 @@ fn tc_ce2e_01_codex_to_claude_full_pipeline() {
     )
     .unwrap();
 
-    // 产物路径:<root>/<project 转义目录>/<新 uuid>.jsonl
+    // Artifact path: <root>/<escaped project dir>/<new uuid>.jsonl
     assert_eq!(
         out.file_path,
         target_root
@@ -97,7 +101,7 @@ fn tc_ce2e_01_codex_to_claude_full_pipeline() {
         .collect();
     assert_eq!(values.len(), 4);
 
-    // 行级公共字段
+    // Shared per-line fields
     for value in &values {
         assert_eq!(value["sessionId"], uuid(1));
         assert_eq!(value["isSidechain"], false);
@@ -108,13 +112,14 @@ fn tc_ce2e_01_codex_to_claude_full_pipeline() {
         assert!(value["uuid"].is_string());
     }
 
-    // parentUuid 链:首条 null,后续逐条指向前一条
+    // parentUuid chain: first line null, each later line pointing at the
+    // previous one
     assert_eq!(values[0]["parentUuid"], Value::Null);
     for i in 1..values.len() {
         assert_eq!(values[i]["parentUuid"], values[i - 1]["uuid"]);
     }
 
-    // 角色与内容形态
+    // Roles and content shapes
     assert_eq!(values[0]["type"], "user");
     assert_eq!(values[0]["message"]["role"], "user");
     assert_eq!(values[0]["message"]["content"], "帮我看一下这个目录");
@@ -136,23 +141,25 @@ fn tc_ce2e_01_codex_to_claude_full_pipeline() {
     assert_eq!(values[3]["message"]["content"][0]["text"], "目录是空的");
     assert_eq!(values[3]["timestamp"], "2026-09-10T10:00:05.000Z");
 
-    // 加密推理绝不进入产物
+    // Encrypted reasoning never enters the artifact
     assert!(!content.contains("eyJlbmNyeXB0"));
 
-    // resume 命令
+    // Resume command
     assert_eq!(
         out.resume_command,
         format!("cd '/tmp/proj-gamma' && claude --resume {}", uuid(1))
     );
 
-    // 源文件逐字节不变(只读迁移)
+    // The source file is byte-for-byte unchanged (read-only migration)
     assert_eq!(source_bytes_before, fs::read(&codex_path).unwrap());
 }
 
-// ---------- TC-CE2E-02:产物可被本库 Claude Code reader 载回 ----------
+// ---------- TC-CE2E-02: the artifact loads back through our Claude Code reader ----------
 
-/// 反向产物用正向 reader 读回,验证行形态与 claude 解析器兼容:
-/// 4 条消息角色正确、标题与 project_dir 语义保留。
+/// Read the reverse-migration artifact back with the forward reader to
+/// verify the line shapes are compatible with the claude parser:
+/// 4 messages with correct roles, with title and project_dir semantics
+/// preserved.
 #[test]
 fn tc_ce2e_02_artifact_readable_by_claude_reader() {
     let src_root = tempfile::tempdir().unwrap();
@@ -174,7 +181,7 @@ fn tc_ce2e_02_artifact_readable_by_claude_reader() {
     assert_eq!(back.summary.project_dir, "/tmp/proj-gamma");
     assert_eq!(back.summary.title, "帮我看一下这个目录");
     assert_eq!(back.summary.message_count, 4);
-    // 读回的消息保留了文本化工具内容
+    // The messages read back retain the textualized tool content
     let texts: Vec<&str> = back
         .messages
         .iter()

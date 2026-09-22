@@ -1,10 +1,12 @@
-//! Codex 会话 rollout JSONL 解析。
+//! Codex session rollout JSONL parsing.
 //!
-//! 源形态:`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`,逐行
-//! `{timestamp, type, payload}` 事件流。只消费 `response_item` 载荷;
-//! `event_msg` 与 `response_item` 信息重复,读取时跳过;`session_meta`/
-//! `turn_context` 仅提取元信息;加密推理(encrypted_content)无法跨工具
-//! 迁移,丢弃。坏行跳过并计数。
+//! Source layout: `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`, a
+//! line-delimited `{timestamp, type, payload}` event stream. Only
+//! `response_item` payloads are consumed; `event_msg` duplicates information
+//! already in `response_item`, so it is skipped on read; `session_meta` /
+//! `turn_context` contribute metadata only; encrypted reasoning
+//! (encrypted_content) cannot migrate across tools and is dropped. Bad lines
+//! are skipped and counted.
 
 use std::collections::HashMap;
 use std::fs;
@@ -16,10 +18,12 @@ use crate::error::HubError;
 use crate::ir::{Role, SessionSummary, UnifiedMessage, UnifiedPart, UnifiedSession};
 use crate::reader::claude::{mtime_rfc3339, sort_key, title_of};
 
-/// 扫描 root(通常 ~/.codex/sessions)下所有 `rollout-*.jsonl`(递归日期目录),
-/// 按 last_active 倒序,同刻 tie-break 按 session_id 字典序——与
-/// reader::claude::scan_sessions 相同。单个文件读取失败(含空会话)时跳过,
-/// 不影响整体扫描;root 本身不存在时报 SourceNotFound。
+/// Scan all `rollout-*.jsonl` under root (usually ~/.codex/sessions,
+/// recursing through date directories), ordered by last_active descending,
+/// tie-broken at equal timestamps by session_id lexicographic order — the
+/// same as reader::claude::scan_sessions. A single file failing to read
+/// (including empty sessions) is skipped without affecting the overall scan;
+/// if root itself does not exist, SourceNotFound is returned.
 pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     if !root.is_dir() {
         return Err(HubError::SourceNotFound(root.to_path_buf()));
@@ -40,9 +44,9 @@ pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     Ok(summaries)
 }
 
-/// 解析单个 rollout 文件为 IR。坏行跳过并计数;event_msg/session_meta/
-/// turn_context 及其他 type 不产生消息;无任何 user/assistant 消息时报
-/// EmptySession。
+/// Parse a single rollout file into IR. Bad lines are skipped and counted;
+/// event_msg/session_meta/turn_context and other types produce no messages;
+/// EmptySession is returned when no user/assistant message remains.
 pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     if !path.is_file() {
         return Err(HubError::SourceNotFound(path.to_path_buf()));
@@ -51,11 +55,13 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
 
     let mut messages = Vec::new();
     let mut parse_warnings = 0usize;
-    // project_dir 优先取首个 turn_context.cwd,缺失时回退 session_meta.cwd
+    // project_dir prefers the first turn_context.cwd, falling back to
+    // session_meta.cwd when absent
     let mut project_dir = String::new();
     let mut meta_cwd: Option<String> = None;
     let mut last_active_line_ts: Option<String> = None;
-    // call_id → 函数名,用于把 function_call_output 关联回对应工具名
+    // call_id → function name, used to link a function_call_output back to
+    // its tool name
     let mut tool_names: HashMap<String, String> = HashMap::new();
 
     for raw_line in content.lines() {
@@ -77,7 +83,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
         let payload = value.get("payload").cloned().unwrap_or(Value::Null);
         let mut produced: Option<UnifiedMessage> = None;
         match value.get("type").and_then(Value::as_str) {
-            // 只记录 cwd,不产生消息
+            // Record the cwd only; produces no message
             Some("session_meta") => {
                 if meta_cwd.is_none() {
                     meta_cwd = payload
@@ -98,7 +104,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
                     }
                 }
             }
-            // UI 事件与 response_item 信息重复,读取时跳过
+            // UI events duplicate response_item information; skip on read
             Some("event_msg") => {}
             Some("response_item") => {
                 produced = match payload.get("type").and_then(Value::as_str) {
@@ -155,22 +161,25 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
                         parts: vec![UnifiedPart::Reasoning(text)],
                         timestamp: line_ts.clone(),
                     }),
-                    // web_search_call 及未知载荷:信息不可迁移或不可解读,忽略不计坏行
+                    // web_search_call and unknown payloads: the information is
+                    // either non-migratable or uninterpretable — ignore
+                    // without counting a bad line
                     _ => None,
                 };
             }
-            // compacted 等其他顶层 type:忽略
+            // compacted and other top-level types: ignore
             _ => {}
         }
         if let Some(message) = produced {
-            // 环境上下文包装(<environment_context>)是 Codex 注入的运行环境回显,
-            // 不是用户真实发言:预览与迁移都跳过整条。
+            // The environment-context wrapper (<environment_context>) is an
+            // echo of the runtime environment injected by Codex, not real
+            // user speech: skip it entirely in both preview and migration.
             let is_env_echo = message.role == Role::User
+                && !message.parts.is_empty()
                 && message.parts.iter().all(|p| match p {
                     UnifiedPart::Text(t) => t.trim_start().starts_with("<environment_context>"),
                     _ => false,
-                })
-                && !message.parts.is_empty();
+                });
             if is_env_echo {
                 continue;
             }
@@ -188,7 +197,8 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
         project_dir = meta_cwd.unwrap_or_default();
     }
 
-    // 最后一条产生消息的行 timestamp;缺失 fallback 文件 mtime(RFC3339)
+    // Timestamp of the last line that produced a message; fall back to the
+    // file mtime (RFC3339) when missing
     let last_active = match last_active_line_ts {
         Some(ts) => ts,
         None => mtime_rfc3339(path)?,
@@ -212,12 +222,13 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     })
 }
 
-/// message 载荷 → 统一消息。content 形态无法解读时计坏行。
+/// message payload → unified message. An uninterpretable content shape
+/// counts as a bad line.
 fn parse_message(payload: &Value, parse_warnings: &mut usize) -> Option<UnifiedMessage> {
     let role = match payload.get("role").and_then(Value::as_str) {
         Some("user") => Role::User,
         Some("assistant") => Role::Assistant,
-        _ => return None, // system 等角色:忽略
+        _ => return None, // system and other roles: ignore
     };
     let blocks = match payload.get("content") {
         Some(Value::Array(blocks)) => blocks,
@@ -237,25 +248,27 @@ fn parse_message(payload: &Value, parse_warnings: &mut usize) -> Option<UnifiedM
                         .unwrap_or_default()
                         .to_string(),
                 )),
-                _ => None, // 未知块类型忽略
+                _ => None, // unknown block types: ignore
             }
         })
         .collect();
     Some(UnifiedMessage {
         role,
         parts,
-        timestamp: None, // 由调用方以行级 timestamp 覆盖
+        timestamp: None, // overwritten by the caller with the line-level timestamp
     })
 }
 
-/// reasoning 载荷:优先取明文 content,为空时回退 summary;两者皆空
-/// (仅有 encrypted_content,不可跨工具迁移)返回 None 整条丢弃。
+/// Reasoning payload: prefer the plaintext content, fall back to summary when
+/// it is empty; when both are empty (only encrypted_content remains, which
+/// cannot migrate across tools) return None and drop the line.
 fn reasoning_part(payload: &Value) -> Option<String> {
     extract_block_text(payload.get("content"))
         .or_else(|| extract_block_text(payload.get("summary")))
 }
 
-/// content/summary 字段的两种形态:字符串,或 [text 块] 数组;空文本视为无内容。
+/// The two shapes of the content/summary fields: a string, or an array of
+/// [text blocks]; empty text counts as no content.
 fn extract_block_text(value: Option<&Value>) -> Option<String> {
     match value {
         Some(Value::String(s)) => (!s.is_empty()).then(|| s.clone()),
@@ -271,7 +284,8 @@ fn extract_block_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-/// 递归收集 rollout-*.jsonl(日期目录任意深度);非 rollout 前缀的 jsonl 不收。
+/// Recursively collect rollout-*.jsonl (date directories at any depth);
+/// jsonl files without the rollout prefix are not collected.
 fn collect_rollout_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HubError> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -305,8 +319,9 @@ mod tests {
         path
     }
 
-    /// 典型会话:meta + turn_context + user 消息 + 加密 reasoning(丢弃)+
-    /// function_call + function_call_output + assistant 消息 + event_msg + 坏行。
+    /// A typical session: meta + turn_context + user message + encrypted
+    /// reasoning (dropped) + function_call + function_call_output + assistant
+    /// message + event_msg + a bad line.
     fn typical_lines() -> Vec<String> {
         vec![
             r#"{"timestamp":"2026-09-10T10:00:00.000Z","type":"session_meta","payload":{"id":"11111111-2222-4333-8444-555555555555","timestamp":"2026-09-10T10:00:00.000Z","cwd":"/tmp/proj-gamma","originator":"codex_tui","cli_version":"0.146.0","source":"cli","thread_source":"user","model_provider":"openai","base_instructions":"巨长的系统提示,应被整体忽略"}}"#
@@ -329,7 +344,8 @@ mod tests {
         ]
     }
 
-    /// 环境上下文包装消息(<environment_context>)整条跳过,标题也跳过。
+    /// Environment-context wrapper messages (<environment_context>) are
+    /// skipped entirely, including for the title.
     #[test]
     fn tc_cread_env_context_echo_skipped() {
         let dir = rollout_dir();
@@ -343,7 +359,8 @@ mod tests {
             ],
         );
         let session = read_session(&path).unwrap();
-        // 环境回显被跳过,仅剩 1 条;标题取真实用户消息
+        // Environment echo skipped, only 1 message left; the title comes from
+        // the real user message
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.summary.title, "帮我修一下登录页");
     }
@@ -359,7 +376,8 @@ mod tests {
         );
         let session = read_session(&path).unwrap();
 
-        // meta/turn_context/event_msg/坏行都不产生消息;加密 reasoning 丢弃
+        // meta/turn_context/event_msg/bad lines produce no message; encrypted
+        // reasoning is dropped
         assert_eq!(session.messages.len(), 4);
         assert_eq!(session.parse_warnings, 1);
 
@@ -373,7 +391,8 @@ mod tests {
             Some("2026-09-10T10:00:01.000Z")
         );
 
-        // function_call → ToolCall(name 即工具名,arguments 原样为 JSON 文本)
+        // function_call → ToolCall (name is the tool, arguments kept verbatim
+        // as JSON text)
         assert_eq!(session.messages[1].role, Role::Assistant);
         assert_eq!(
             session.messages[1].parts,
@@ -383,7 +402,7 @@ mod tests {
             }]
         );
 
-        // function_call_output → ToolResult(call_id 关联回工具名)
+        // function_call_output → ToolResult (call_id linked back to the tool name)
         assert_eq!(session.messages[2].role, Role::User);
         assert_eq!(
             session.messages[2].parts,
@@ -400,10 +419,11 @@ mod tests {
             vec![UnifiedPart::Text("目录是空的".to_string())]
         );
 
-        // 摘要字段
+        // Summary fields
         assert_eq!(session.summary.title, "帮我看一下这个目录");
         assert_eq!(session.summary.project_dir, "/tmp/proj-gamma");
-        // 最后一条消息行的 timestamp(event_msg/坏行不计)
+        // Timestamp of the last message-bearing line (event_msg/bad lines
+        // don't count)
         assert_eq!(session.summary.last_active, "2026-09-10T10:00:05.000Z");
         assert_eq!(session.summary.message_count, 4);
         assert_eq!(
@@ -412,14 +432,15 @@ mod tests {
         );
         assert_eq!(session.summary.source_path, path);
 
-        // 加密推理绝不进入 IR
+        // Encrypted reasoning never enters the IR
         let serialized = serde_json::to_string(&session).unwrap();
         assert!(!serialized.contains("encrypted"));
         assert!(!serialized.contains("eyJlbmNyeXB0ZWQ"));
     }
 
     // ---------- TC-CREAD-02 ----------
-    /// 明文 reasoning 保留;content 为空时回退 summary;两者皆空丢弃。
+    /// Plaintext reasoning is kept; an empty content falls back to summary;
+    /// both empty means the line is dropped.
     #[test]
     fn tc_cread_02_reasoning_plaintext_and_summary_fallback() {
         let dir = rollout_dir();
@@ -436,7 +457,8 @@ mod tests {
             ],
         );
         let session = read_session(&path).unwrap();
-        // 第三个 reasoning(content 与 summary 皆空)不产生消息
+        // The third reasoning (content and summary both empty) produces no
+        // message
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].role, Role::Assistant);
         assert_eq!(
@@ -450,11 +472,11 @@ mod tests {
     }
 
     // ---------- TC-CREAD-03 ----------
-    /// project_dir:首个 turn_context.cwd,缺失回退 session_meta.cwd。
+    /// project_dir: first turn_context.cwd, falling back to session_meta.cwd.
     #[test]
     fn tc_cread_03_project_dir_turn_context_first_meta_fallback() {
         let dir = rollout_dir();
-        // 无 turn_context:回退 session_meta.cwd
+        // No turn_context: fall back to session_meta.cwd
         let path = write_lines(
             &dir,
             "rollout-a.jsonl",
@@ -468,7 +490,8 @@ mod tests {
         let session = read_session(&path).unwrap();
         assert_eq!(session.summary.project_dir, "/tmp/from-meta");
 
-        // 两者都缺:project_dir 为空串(写入端自行降级)
+        // Both missing: project_dir is the empty string (the writer side
+        // degrades on its own)
         let path2 = write_lines(
             &dir,
             "rollout-b.jsonl",
@@ -480,7 +503,8 @@ mod tests {
     }
 
     // ---------- TC-CREAD-04 ----------
-    /// 标题:跳过包装文本取首条真实用户输入,并截断到 50 char。
+    /// Title: skip wrapper texts, take the first real user input, truncate to
+    /// 50 chars.
     #[test]
     fn tc_cread_04_title_skips_wrappers_and_truncates() {
         let dir = rollout_dir();
@@ -503,14 +527,16 @@ mod tests {
             ],
         );
         let session = read_session(&path).unwrap();
-        // 四条包装文本全部跳过,标题取第 5 条并截 50 char
+        // All four wrapper texts skipped; the title is the 5th line,
+        // truncated to 50 chars
         assert_eq!(session.summary.title.chars().count(), 50);
         assert!(session.summary.title.chars().all(|c| c == '题'));
-        // 包装文本本身仍保留在消息里(只影响标题提取)
+        // The wrapper texts themselves stay in the messages (they only affect
+        // title extraction)
         assert_eq!(session.messages.len(), 5);
     }
 
-    /// 无 user 文本的会话标题为 "untitled"。
+    /// A session without user text gets the title "untitled".
     #[test]
     fn tc_cread_04_title_untitled_without_user_text() {
         let dir = rollout_dir();
@@ -546,7 +572,8 @@ mod tests {
     }
 
     // ---------- TC-CREAD-06 ----------
-    /// 消息行 timestamp 缺失时 last_active 回退文件 mtime。
+    /// When message lines carry no timestamp, last_active falls back to the
+    /// file mtime.
     #[test]
     fn tc_cread_06_missing_timestamps_fall_back_to_mtime() {
         let dir = rollout_dir();
@@ -562,8 +589,9 @@ mod tests {
     }
 
     // ---------- TC-CREAD-07 ----------
-    /// 扫描:递归日期目录、只认 rollout-* 前缀、坏文件跳过、
-    /// last_active 倒序 + session_id 字典序 tie-break。
+    /// Scan: recurses date directories, accepts only the rollout-* prefix,
+    /// skips bad files, orders by last_active desc with session_id
+    /// lexicographic tie-break.
     #[test]
     fn tc_cread_07_scan_recurses_filters_and_orders() {
         let root = rollout_dir();
@@ -590,10 +618,10 @@ mod tests {
             "2026/09/11/rollout-new-zzz.jsonl",
             "2026-09-11T12:00:00.000Z",
         );
-        // 非 rollout 前缀的 jsonl:忽略
+        // A jsonl without the rollout prefix: ignored
         let other = root.path().join("notes.jsonl");
         fs::write(&other, one_user("2026-09-12T00:00:00.000Z") + "\n").unwrap();
-        // rollout 前缀但内容为空:读取失败,扫描跳过
+        // rollout prefix but empty content: read fails, scan skips it
         let bad = root.path().join("2026/09/10/rollout-bad.jsonl");
         fs::create_dir_all(bad.parent().unwrap()).unwrap();
         fs::write(&bad, "").unwrap();
@@ -615,8 +643,9 @@ mod tests {
         assert!(matches!(err, HubError::SourceNotFound(_)));
     }
 
-    /// function_call_output 的 call_id 关联不到函数时,工具名退化为 call_id;
-    /// web_search_call 等其他 response_item 载荷不产生消息。
+    /// When a function_call_output's call_id cannot be matched to a function,
+    /// the tool name degrades to the call_id; other response_item payloads
+    /// such as web_search_call produce no message.
     #[test]
     fn tc_cread_09_unknown_call_id_and_ignored_payload_kinds() {
         let dir = rollout_dir();
@@ -642,7 +671,7 @@ mod tests {
                 is_error: false,
             }]
         );
-        // 未知载荷不计坏行
+        // Unknown payloads do not count as bad lines
         assert_eq!(session.parse_warnings, 0);
     }
 }

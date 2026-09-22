@@ -1,9 +1,10 @@
-//! ZCode 桌面应用会话库(SQLite)读取。
+//! ZCode desktop-app session database (SQLite) reading.
 //!
-//! 源形态:`~/.zcode/cli/db/db.sqlite`(WAL 模式)。session/message/part 三表
-//! 承载会话正文;message 按 sequence 排序,每条消息取其 parts 中第一个
-//! text/reasoning/tool part 进入 IR——step-start/step-finish/timeline 等
-//! 界面事件形态跳过,没有可用 part 的消息整条跳过。
+//! Source layout: `~/.zcode/cli/db/db.sqlite` (WAL mode). The session/message/part
+//! tables carry the session body; messages are ordered by sequence, and for
+//! each message the first text/reasoning/tool part among its parts enters the
+//! IR — UI-event shapes such as step-start/step-finish/timeline are skipped,
+//! and a message with no usable part is skipped whole.
 
 use std::path::Path;
 
@@ -15,11 +16,13 @@ use crate::error::HubError;
 use crate::ir::{Role, SessionSummary, UnifiedMessage, UnifiedPart, UnifiedSession};
 use crate::reader::claude::title_of;
 
-/// 扫描库中全部未归档(time_archived 为 NULL)会话,按 time_updated 倒序,
-/// 同刻 tie-break 按 session_id 字典序。
+/// Scan all non-archived (time_archived IS NULL) sessions in the database,
+/// ordered by time_updated descending, tie-broken at equal timestamps by
+/// session_id lexicographic order.
 ///
-/// 单个会话读取失败(含空会话)时跳过,不影响整体扫描;
-/// 库文件本身不存在时报 SourceNotFound。
+/// A single session failing to read (including empty sessions) is skipped
+/// without affecting the overall scan; if the database file itself does not
+/// exist, SourceNotFound is returned.
 pub fn scan_sessions(db_path: &Path) -> Result<Vec<SessionSummary>, HubError> {
     if !db_path.is_file() {
         return Err(HubError::SourceNotFound(db_path.to_path_buf()));
@@ -31,7 +34,8 @@ pub fn scan_sessions(db_path: &Path) -> Result<Vec<SessionSummary>, HubError> {
     let ids: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .collect::<Result<_, _>>()?;
-    // SQL 已给出目标顺序;读取失败的会话直接缺席
+    // The SQL already yields the target order; sessions that fail to read
+    // are simply absent
     let mut summaries = Vec::new();
     for id in ids {
         if let Ok(session) = read_session_on(&conn, db_path, &id) {
@@ -41,8 +45,9 @@ pub fn scan_sessions(db_path: &Path) -> Result<Vec<SessionSummary>, HubError> {
     Ok(summaries)
 }
 
-/// 读取单个会话为 IR。会话 id 不存在或库文件不存在报 SourceNotFound;
-/// 没有任何可解读消息时报 EmptySession。
+/// Read a single session into IR. Returns SourceNotFound when the session id
+/// or the database file does not exist; EmptySession when no message is
+/// interpretable.
 pub fn read_session(db_path: &Path, session_id: &str) -> Result<UnifiedSession, HubError> {
     if !db_path.is_file() {
         return Err(HubError::SourceNotFound(db_path.to_path_buf()));
@@ -51,7 +56,8 @@ pub fn read_session(db_path: &Path, session_id: &str) -> Result<UnifiedSession, 
     read_session_on(&conn, db_path, session_id)
 }
 
-/// 在已有连接上读取单个会话(scan 复用同一连接,避免逐会话重开库)。
+/// Read a single session on an existing connection (scan reuses one
+/// connection instead of reopening the database per session).
 fn read_session_on(
     conn: &Connection,
     db_path: &Path,
@@ -97,16 +103,18 @@ fn read_session_on(
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
             _ => {
-                // 角色缺失/未知:该行不可解读,计坏行
+                // Missing/unknown role: the row is uninterpretable, count it
+                // as a bad line
                 parse_warnings += 1;
                 continue;
             }
         };
         let part = match first_unified_part(&mut part_stmt, &message_id, &mut parse_warnings)? {
             Some(part) => part,
-            None => continue, // 没有任何 text/reasoning/tool part:整条跳过
+            None => continue, // no text/reasoning/tool part at all: skip whole
         };
-        // 消息时间优先取 data.time.created,缺失回退行级 time_created
+        // Message time prefers data.time.created, falling back to the
+        // row-level time_created
         let created_ms = data
             .pointer("/time/created")
             .and_then(Value::as_i64)
@@ -125,7 +133,8 @@ fn read_session_on(
     let summary = SessionSummary {
         session_id: session_id.to_string(),
         source_path: db_path.to_path_buf(),
-        // 标题以库内 session.title 为准;为空时回退到消息推导(与其他 reader 一致)
+        // The title defers to session.title in the database; when empty it
+        // falls back to derivation from messages (same as the other readers)
         title: if title.is_empty() {
             title_of(&messages)
         } else {
@@ -142,9 +151,11 @@ fn read_session_on(
     })
 }
 
-/// 依序扫描消息的 parts,返回第一个可进入 IR 的内容块
-/// (text/reasoning/tool);其余形态(step-start/step-finish/timeline 与
-/// 未知类型)跳过;JSON 非法计坏行。tool part 只取 state.input,输出不入 IR。
+/// Scan a message's parts in order and return the first content block
+/// eligible for the IR (text/reasoning/tool); other shapes
+/// (step-start/step-finish/timeline and unknown types) are skipped;
+/// invalid JSON counts as a bad line. A tool part contributes only
+/// state.input — output never enters the IR.
 fn first_unified_part(
     part_stmt: &mut rusqlite::Statement<'_>,
     message_id: &str,
@@ -160,7 +171,8 @@ fn first_unified_part(
     Ok(None)
 }
 
-/// 单个 part.data JSON → IR 内容块;不可用形态返回 None(调用方继续看下一个)。
+/// A single part.data JSON → IR content block; unusable shapes return None
+/// (the caller moves on to the next part).
 fn unified_part_of(data_json: &str, parse_warnings: &mut usize) -> Option<UnifiedPart> {
     let value: Value = match serde_json::from_str(data_json) {
         Ok(v) => v,
@@ -199,8 +211,9 @@ fn unified_part_of(data_json: &str, parse_warnings: &mut usize) -> Option<Unifie
     }
 }
 
-/// epoch 毫秒 → RFC3339(UTC 毫秒,Z 结尾)。超出表示范围时退化为 Unix 纪元,
-/// 保证输出始终是合法可解析时间。
+/// Epoch milliseconds → RFC3339 (UTC milliseconds, Z suffix). Values outside
+/// the representable range degrade to the Unix epoch so the output is always
+/// a valid, parseable timestamp.
 fn ms_to_rfc3339(ms: i64) -> String {
     DateTime::<Utc>::from_timestamp_millis(ms)
         .unwrap_or_default()
@@ -212,7 +225,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// 与真机一致的 cli 库最小表结构(仅 reader/writer 触及的表,列名精确)。
+    /// Minimal cli-database schema matching the real device (only the tables
+    /// reader/writer touch, with exact column names).
     const CLI_DDL: &str = "
         CREATE TABLE session(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT NOT NULL, version TEXT NOT NULL, share_url TEXT, summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER, summary_diffs TEXT, revert TEXT, permission TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_compacting INTEGER, time_archived INTEGER, task_type TEXT NOT NULL DEFAULT 'interactive', title_source TEXT NOT NULL DEFAULT 'generated', title_message_id TEXT, time_title_updated INTEGER, trace_id TEXT);
         CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
@@ -220,7 +234,8 @@ mod tests {
         CREATE TABLE schema_migration(id TEXT PRIMARY KEY, checksum TEXT NOT NULL, app_version TEXT, time_applied INTEGER NOT NULL);
     ";
 
-    /// 建库并落一行已验证支持的迁移记录(写入协议要求;reader 本身不校验)。
+    /// Build a database and insert one verified-supported migration record
+    /// (required by the write protocol; the reader itself does not check it).
     fn build_cli_db(dir: &tempfile::TempDir) -> PathBuf {
         let path = dir.path().join("db.sqlite");
         let conn = Connection::open(&path).unwrap();
@@ -292,7 +307,8 @@ mod tests {
         .unwrap();
     }
 
-    /// 解析 RFC3339 回 epoch 毫秒(断言时间转换往返用)。
+    /// Parse an RFC3339 string back to epoch milliseconds (for asserting
+    /// time-conversion round trips).
     fn to_ms(rfc3339: &str) -> i64 {
         DateTime::parse_from_rfc3339(rfc3339)
             .unwrap()
@@ -300,8 +316,9 @@ mod tests {
     }
 
     // ---------- TC-ZREAD-01 ----------
-    /// text/reasoning/tool 三种 part 的读取、step/timeline 跳过、
-    /// "每条消息只取第一个可用 part"、坏 JSON 计坏行、摘要字段与时间转换。
+    /// Reading the three part kinds text/reasoning/tool, skipping
+    /// step/timeline, "only the first usable part per message", bad JSON
+    /// counting as a bad line, and summary fields plus time conversion.
     #[test]
     fn tc_zread_01_part_kinds_first_match_and_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -340,7 +357,7 @@ mod tests {
                 1,
                 r#"{"type":"text","text":"帮我看一下这个项目","time":{"start":1789055537517,"end":1789055537520}}"#,
             );
-            // assistant:reasoning 在 tool 之前 → 只取 reasoning
+            // assistant: reasoning precedes tool → only reasoning is taken
             insert_message(
                 &conn,
                 "m2",
@@ -365,7 +382,8 @@ mod tests {
                 1,
                 r#"{"type":"tool","callID":"call_1","tool":"Bash","state":{"status":"completed","input":{"command":"ls -la"},"output":"total 0"}}"#,
             );
-            // assistant:timeline 之后是 tool → 只取 tool,input 序列化、output 忽略
+            // assistant: a tool follows the timeline → only the tool is
+            // taken, with input serialized and output ignored
             insert_message(
                 &conn,
                 "m3",
@@ -390,7 +408,7 @@ mod tests {
                 1,
                 r#"{"type":"tool","callID":"call_2","tool":"Read","state":{"status":"completed","input":{"path":"src/main.rs"},"output":"fn main() {}"}}"#,
             );
-            // 只有 step-start/step-finish 的消息:整条跳过
+            // A message with only step-start/step-finish: skipped whole
             insert_message(
                 &conn,
                 "m4",
@@ -401,7 +419,7 @@ mod tests {
             );
             insert_part(&conn, "p7", "m4", "sess-a", 0, r#"{"type":"step-start"}"#);
             insert_part(&conn, "p8", "m4", "sess-a", 1, r#"{"type":"step-finish"}"#);
-            // 完全没有 part 的消息:跳过
+            // A message with no parts at all: skipped
             insert_message(
                 &conn,
                 "m5",
@@ -410,7 +428,8 @@ mod tests {
                 1789055538110,
                 r#"{"role":"user","time":{"created":1789055538110}}"#,
             );
-            // 坏 JSON part 计坏行,后续 text part 正常取用
+            // A bad-JSON part counts as a bad line; the text part after it
+            // is taken normally
             insert_message(
                 &conn,
                 "m6",
@@ -464,7 +483,8 @@ mod tests {
             vec![UnifiedPart::Text("第二个问题".to_string())]
         );
 
-        // 摘要:标题/项目目录取 session 行,last_active 为 time_updated 的 RFC3339
+        // Summary: title/project_dir come from the session row; last_active
+        // is time_updated rendered as RFC3339
         assert_eq!(session.summary.session_id, "sess-a");
         assert_eq!(session.summary.title, "会话标题");
         assert_eq!(session.summary.project_dir, "/Users/x/demo");
@@ -474,7 +494,8 @@ mod tests {
     }
 
     // ---------- TC-ZREAD-02 ----------
-    /// 扫描:按 time_updated 倒序、同刻按 session_id 字典序,归档会话排除。
+    /// Scan: ordered by time_updated desc, tie-broken by session_id
+    /// lexicographic order; archived sessions excluded.
     #[test]
     fn tc_zread_02_scan_order_and_archived_excluded() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,7 +519,8 @@ mod tests {
             one_text(&conn, "s-old");
             insert_session(&conn, "s-mid", "中", "/p", 4000, None);
             one_text(&conn, "s-mid");
-            // 同刻两条,字典序 s-new-a 在 s-new-z 前;归档的一条不出现
+            // Two sessions share a timestamp: s-new-a sorts before s-new-z
+            // lexicographically; the archived one never appears
             insert_session(&conn, "s-new-z", "新z", "/p", 5000, None);
             one_text(&conn, "s-new-z");
             insert_session(&conn, "s-new-a", "新a", "/p", 5000, None);
@@ -513,9 +535,9 @@ mod tests {
     }
 
     // ---------- TC-ZREAD-03 ----------
-    /// 库文件不存在 / 会话 id 不存在报 SourceNotFound;
-    /// 会话存在但没有任何可解读消息报 EmptySession;
-    /// 空标题回退为首条 user 文本推导。
+    /// A missing database file or unknown session id → SourceNotFound;
+    /// an existing session with no interpretable message → EmptySession;
+    /// an empty title falls back to derivation from the first user text.
     #[test]
     fn tc_zread_03_not_found_empty_session_and_title_fallback() {
         let missing = PathBuf::from("/definitely/not/existing/db.sqlite");
@@ -533,7 +555,7 @@ mod tests {
         {
             let conn = Connection::open(&db).unwrap();
             insert_session(&conn, "s-empty", "", "/p", 100, None);
-            // 只有 step-start part:无可解读消息
+            // Only a step-start part: no interpretable message
             insert_message(
                 &conn,
                 "m",
@@ -546,7 +568,7 @@ mod tests {
         }
         let err = read_session(&db, "s-empty").unwrap_err();
         assert!(matches!(err, HubError::EmptySession(_)));
-        // 空会话在扫描中缺席(不报错)
+        // The empty session is absent from the scan (no error)
         assert!(scan_sessions(&db).unwrap().is_empty());
 
         {
@@ -572,7 +594,7 @@ mod tests {
         let session = read_session(&db, "s-untitled").unwrap();
         assert_eq!(session.summary.title, "首条提问作为标题");
 
-        // 库存在但会话 id 不存在
+        // Database exists but the session id does not
         assert!(matches!(
             read_session(&db, "no-such-session"),
             Err(HubError::SourceNotFound(_))
@@ -580,7 +602,8 @@ mod tests {
     }
 
     // ---------- TC-ZREAD-04 ----------
-    /// 时间转换:0 毫秒 → Unix 纪元的标准 RFC3339 字符串。
+    /// Time conversion: 0 milliseconds → the canonical RFC3339 string of the
+    /// Unix epoch.
     #[test]
     fn tc_zread_04_epoch_zero_renders_unix_epoch() {
         let dir = tempfile::tempdir().unwrap();

@@ -1,17 +1,23 @@
-//! ZCode 桌面应用会话库(SQLite)写入。
+//! ZCode desktop-app session database (SQLite) writing.
 //!
-//! 目标形态:双库——`~/.zcode/cli/db/db.sqlite`(session/message/part 三表,
-//! 会话正文)与 `~/.zcode/v2/tasks-index.sqlite`(tasks 表,桌面任务列表)。
+//! Target layout: dual databases — `~/.zcode/cli/db/db.sqlite`
+//! (session/message/part tables, the session body) and
+//! `~/.zcode/v2/tasks-index.sqlite` (tasks table, the desktop task list).
 //!
-//! 写入协议(护栏,缺一不可):
-//! 1. 校验 cli 库 schema_migration 最新 id 以已验证支持的前缀开头,
-//!    不认识则拒绝写入(更高版本可能改表结构);
-//! 2. 两个库各自动备份为 `<原路径>.hub-backup-<时间戳>`,备份失败即中止;
-//! 3. cli 库单事务写 session+message+part,任一失败整体回滚;
-//!    tasks 库单事务写任务行;
-//! 4. 幂等:session.id 已存在报 TargetExists,不动任何数据(含不产生备份)。
+//! Write protocol (guardrails, all mandatory):
+//! 1. Verify that the cli database's latest schema_migration id starts with a
+//!    verified-supported prefix; refuse to write on anything unrecognized (a
+//!    newer version may have changed the table layout);
+//! 2. Back up both databases as `<original path>.hub-backup-<timestamp>`;
+//!    abort immediately if a backup fails;
+//! 3. Write session+message+part to the cli database in a single transaction,
+//!    rolling back entirely on any failure; write the task row to the tasks
+//!    database in its own single transaction;
+//! 4. Idempotent: an already-existing session.id reports TargetExists and
+//!    touches no data (including creating no backup).
 //!
-//! 我们只在既有 ZCode 安装上追加会话,绝不初始化新库;库文件不存在直接拒绝。
+//! We only ever append sessions to an existing ZCode installation and never
+//! initialize a new database; a missing database file is rejected outright.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,35 +31,41 @@ use crate::ir::{Role, UnifiedSession};
 use crate::mapper::render_parts;
 use crate::writer::codex::{IdGen, SystemIdGen};
 
-/// 固定字段值(与 2026-09 真机观测一致)。
+/// Fixed field values (matching real-device observations from 2026-09).
 const AGENT: &str = "zcode-agent";
 const PROVIDER_ID: &str = "builtin:bigmodel-coding-plan";
 const MODEL_ID: &str = "GLM-5.3-Flash";
 const MODEL_VARIANT: &str = "low";
 const MODE: &str = "build";
-/// tasks 行与 meta_json 的 provider 必须是 ZCode 校验枚举
-/// (claude|opencode|gemini|codex|glm)之一,否则加载时整行被静默丢弃
-/// (真机日志:task-index-repo "读取 task index meta_json 非法")。
+/// The provider in the tasks row and meta_json must be one of ZCode's
+/// validated enums (claude|opencode|gemini|codex|glm); otherwise the whole
+/// row is silently dropped at load time (real-device log: task-index-repo
+/// "读取 task index meta_json 非法").
 const TASKS_PROVIDER: &str = "glm";
 const FINISH: &str = "completed";
 const TASK_TYPE: &str = "interactive";
 const TITLE_SOURCE: &str = "generated";
-/// 桌面任务列表的状态值:迁移进来的都是已完结的对话。
+/// Status value for the desktop task list: everything migrated in is an
+/// already-finished conversation.
 const TASK_STATUS: &str = "completed";
-/// 已验证支持的 schema_migration 版本前缀;更高版本可能改表结构,直接拒绝。
+/// Verified-supported schema_migration version prefix; a newer version may
+/// have changed the table layout — reject outright.
 const SUPPORTED_MIGRATION_PREFIX: &str = "0018";
-/// schema_migration 表缺失/无记录时的占位描述(进入 SchemaUnsupported 文案)。
+/// Placeholder description when the schema_migration table is missing or has
+/// no records (surfaces in the SchemaUnsupported message).
 const NO_MIGRATION: &str = "无迁移记录";
 
 #[derive(Debug)]
 pub struct ZcodeWriteOutput {
     pub session_id: String,
-    /// ZCode 为桌面应用,没有终端续聊命令;此处暂为空串,
-    /// 「迁移后打开会话」由应用层后续处理。
+    /// ZCode is a desktop app with no terminal resume command; this stays an
+    /// empty string for now — "open the session after migration" is handled
+    /// later at the application layer.
     pub resume_command: String,
 }
 
-/// 便捷入口:系统时刻与随机 uuid。确定性测试请用 [`write_session_with`]。
+/// Convenience entry point: system time and random uuid. Use
+/// [`write_session_with`] for deterministic tests.
 pub fn write_session(
     ir: &UnifiedSession,
     cli_db: &Path,
@@ -62,14 +74,16 @@ pub fn write_session(
     write_session_with(ir, cli_db, tasks_db, &SystemIdGen)
 }
 
-/// 注入 IdGen 的写入入口:会话/消息/部件 id 与兜底时间由 gen 提供。
+/// Write entry point with an injected IdGen: session/message/part ids and
+/// fallback timestamps come from gen.
 pub fn write_session_with(
     ir: &UnifiedSession,
     cli_db: &Path,
     tasks_db: &Path,
     gen: &dyn IdGen,
 ) -> Result<ZcodeWriteOutput, HubError> {
-    // ---- 1. 纯内存准备:任何输入问题都在触碰库文件之前报出 ----
+    // ---- 1. Pure in-memory preparation: report any input problem before
+    //         touching the database files ----
     if ir.summary.project_dir.is_empty() {
         return Err(HubError::InvalidInput(
             "源会话缺少项目目录(project_dir),无法确定 ZCode 工作区".to_string(),
@@ -78,12 +92,14 @@ pub fn write_session_with(
     let project_dir = ir.summary.project_dir.clone();
     let now_ms = now_millis(gen)?;
     let session_id = format!("sess_{}", gen.uuid_v4());
-    // ZCode 任务列表加载时校验 meta_json,traceId 必填
+    // ZCode's task list validates meta_json on load; traceId is mandatory
     let trace_id = gen.uuid_v4();
 
-    // 逐消息渲染:每条 IR 消息 → 1 message + 1 text part(内容用统一合并规则);
-    // 空 parts 或合并后为空的消息跳过;全部为空报 EmptySession。
-    // parentID 指向前一条落库消息,首条不带该字段。
+    // Render message by message: each IR message → 1 message + 1 text part
+    // (content follows the unified merging rules); messages with empty parts
+    // or empty merged text are skipped; EmptySession when all are skipped.
+    // parentID points at the previous persisted message; the first message
+    // omits the field.
     let mut planned: Vec<PlannedMessage> = Vec::new();
     let mut parent_id: Option<String> = None;
     for message in &ir.messages {
@@ -120,13 +136,17 @@ pub fn write_session_with(
         return Err(HubError::EmptySession(ir.summary.source_path.clone()));
     }
 
-    // 会话创建/更新时间取迁移时刻:迁移后的会话要在 ZCode 任务列表顶部
-    // 立即可见。若沿用源会话的活跃时间,新迁入的会话会按旧日期沉在列表
-    // 底部(真实数据验证发现用户以为迁移失败)。会话内消息仍保留各自原始时间。
+    // Session creation/update times take the migration moment: a freshly
+    // migrated session must be immediately visible at the top of ZCode's task
+    // list. Keeping the source session's activity time would sink newly
+    // migrated sessions to the bottom under their old dates (real-data
+    // validation showed users concluding the migration had failed). Messages
+    // inside the session keep their original timestamps.
     let time_created = now_ms;
     let time_updated = now_ms;
 
-    // ---- 2. 目标库必须已存在:绝不初始化/覆盖一个新库 ----
+    // ---- 2. Both target databases must already exist: never initialize or
+    //         overwrite a new database ----
     if !cli_db.is_file() {
         return Err(HubError::InvalidInput(format!(
             "目标会话库不存在: {}",
@@ -140,14 +160,15 @@ pub fn write_session_with(
         )));
     }
 
-    // ---- 3. schema 校验:只写入已验证支持的库版本 ----
+    // ---- 3. Schema check: write only into verified-supported database versions ----
     let mut cli_conn = Connection::open(cli_db)?;
     let (migration_id, app_version) = latest_migration(&cli_conn)?;
     if !migration_id.starts_with(SUPPORTED_MIGRATION_PREFIX) {
         return Err(HubError::SchemaUnsupported(migration_id));
     }
 
-    // ---- 4. 幂等:session.id 已存在即拒绝,不动任何数据(也不产生备份)----
+    // ---- 4. Idempotent: refuse if session.id already exists, touching no
+    //         data (and creating no backup) ----
     let exists: i64 = cli_conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
         params![session_id],
@@ -157,12 +178,14 @@ pub fn write_session_with(
         return Err(HubError::TargetExists(cli_db.to_path_buf()));
     }
 
-    // ---- 5. 自动备份:任何写入动作之前,两个库各复制一份带时间戳的副本 ----
-    let backup_stamp = gen.now_rfc3339(); // 文件名友好格式(冒号转连字符)
+    // ---- 5. Automatic backup: before any write action, copy both databases
+    //         to timestamped replicas ----
+    let backup_stamp = gen.now_rfc3339(); // filename-friendly format (colons → hyphens)
     backup_db(cli_db, &backup_stamp)?;
     backup_db(tasks_db, &backup_stamp)?;
 
-    // ---- 6. cli 库单事务:session + message + part,任一失败整体回滚 ----
+    // ---- 6. cli database single transaction: session + message + part;
+    //         any failure rolls back the whole thing ----
     let project_id = project_id_of(&project_dir);
     let title = ir.summary.title.clone();
     {
@@ -172,13 +195,13 @@ pub fn write_session_with(
             params![
                 session_id,
                 project_id,
-                None::<&str>, // workspace_id:库允许为空
-                None::<&str>, // parent_id:顶层会话
-                session_id,   // slug 规则:等于 id
+                None::<&str>, // workspace_id: the database allows NULL
+                None::<&str>, // parent_id: top-level session
+                session_id,   // slug rule: equals the id
                 project_dir,
-                None::<&str>, // path:可空的遗留字段
+                None::<&str>, // path: nullable legacy field
                 title,
-                app_version.unwrap_or_default(), // 版本沿用库内迁移记录的应用版本
+                app_version.unwrap_or_default(), // version follows the app version of the database's migration record
                 None::<&str>,                    // share_url
                 None::<i64>,                     // summary_additions
                 None::<i64>,                     // summary_deletions
@@ -189,7 +212,7 @@ pub fn write_session_with(
                 time_created,
                 time_updated,
                 None::<i64>, // time_compacting
-                None::<i64>, // time_archived:必须为空,否则桌面端不显示
+                None::<i64>, // time_archived: must be NULL, or the desktop app won't show it
                 TASK_TYPE,
                 TITLE_SOURCE,
                 None::<&str>, // title_message_id
@@ -220,22 +243,23 @@ pub fn write_session_with(
                     message.ts_ms,
                     message.ts_ms,
                     message.part_data_json,
-                    0 // 每条消息恰好一个 part
+                    0 // exactly one part per message
                 ],
             )?;
         }
         tx.commit()?;
     }
 
-    // ---- 7. tasks 库单事务:桌面任务列表行(task_id 必须等于 session.id)----
+    // ---- 7. tasks database single transaction: the desktop task-list row
+    //         (task_id must equal session.id) ----
     {
         let mut tasks_conn = Connection::open(tasks_db)?;
         let tx = tasks_conn.transaction()?;
         tx.execute(
             INSERT_TASK_SQL,
             params![
-                project_dir,  // workspace_key = 项目绝对路径
-                project_dir,  // workspace_path = 项目绝对路径
+                project_dir,  // workspace_key = absolute project path
+                project_dir,  // workspace_path = absolute project path
                 None::<&str>, // workspace_identity
                 session_id,
                 title,
@@ -243,14 +267,14 @@ pub fn write_session_with(
                 TASKS_PROVIDER,
                 MODE,
                 MODEL_ID,
-                None::<&str>, // migration_source:ZCode 自身迁移用
+                None::<&str>, // migration_source: reserved for ZCode's own migrations
                 None::<&str>, // forked_from_task_id
                 time_created,
                 time_updated,
                 None::<i64>, // unread_at
                 0,           // last_unread_at
                 0,           // pinned
-                0,           // archived:必须为 0,否则列表不显示
+                0,           // archived: must be 0, or the list won't show it
                 0,           // deleted
                 0,           // title_overridden
                 task_meta_json(
@@ -261,7 +285,7 @@ pub fn write_session_with(
                     time_created,
                     time_updated,
                 ),
-                title,        // searchable_text:以标题参与搜索
+                title,        // searchable_text: the title participates in search
                 None::<&str>, // cron_automation_id
                 None::<&str>, // off_peak_task_id
             ],
@@ -275,8 +299,8 @@ pub fn write_session_with(
     })
 }
 
-/// 写入前组装完成的一条消息(1 message 行 + 1 text part 行)。
-/// parentID 已在 data_json 内,无需单独携带。
+/// A message fully assembled before writing (1 message row + 1 text part row).
+/// parentID already lives inside data_json, so it needs no separate field.
 struct PlannedMessage {
     message_id: String,
     part_id: String,
@@ -313,8 +337,9 @@ const INSERT_TASK_SQL: &str = "
         ?22, ?23
     )";
 
-/// 取 schema_migration 最新一条(按 time_applied,同刻按 id 兜底)。
-/// 表缺失或无记录时返回占位描述,由调用方按「不受支持」拒绝。
+/// Take the latest schema_migration record (by time_applied, tie-broken by id
+/// at equal timestamps). A missing table or no records yields the placeholder
+/// description, which the caller rejects as "unsupported".
 fn latest_migration(conn: &Connection) -> Result<(String, Option<String>), HubError> {
     let has_table: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migration'",
@@ -336,8 +361,9 @@ fn latest_migration(conn: &Connection) -> Result<(String, Option<String>), HubEr
     }
 }
 
-/// 把库文件复制为 `<原路径>.hub-backup-<时间戳>`;文件不存在则跳过。
-/// 备份失败即中止写入:绝不无备份地改动目标库。
+/// Copy the database file to `<original path>.hub-backup-<timestamp>`; skip
+/// when the file does not exist. A failed backup aborts the write: never
+/// modify a target database without a backup.
 fn backup_db(db: &Path, stamp: &str) -> Result<(), HubError> {
     if !db.exists() {
         return Ok(());
@@ -347,8 +373,9 @@ fn backup_db(db: &Path, stamp: &str) -> Result<(), HubError> {
     Ok(())
 }
 
-/// project_id 规则(真机验证):去掉前导斜杠,路径内斜线转连字符,转小写,
-/// 前缀 "proj_"。例:/Users/x/MyProj → proj_users-x-myproj。
+/// project_id rule (verified on a real device): strip the leading slash,
+/// turn inner slashes into hyphens, lowercase, prefix "proj_".
+/// Example: /Users/x/MyProj → proj_users-x-myproj.
 fn project_id_of(directory: &str) -> String {
     format!(
         "proj_{}",
@@ -359,23 +386,24 @@ fn project_id_of(directory: &str) -> String {
     )
 }
 
-/// 从 IdGen 的 RFC3339 时刻取 epoch 毫秒。
+/// Epoch milliseconds from the IdGen's RFC3339 time.
 fn now_millis(gen: &dyn IdGen) -> Result<i64, HubError> {
     DateTime::parse_from_rfc3339(&gen.now_rfc3339_colon())
         .map(|dt| dt.with_timezone(&Utc).timestamp_millis())
         .map_err(|_| HubError::InvalidInput("时间源返回值不是合法 RFC3339".to_string()))
 }
 
-/// RFC3339 字符串 → epoch 毫秒;无法解析返回 None。
+/// RFC3339 string → epoch milliseconds; None when unparseable.
 fn parse_ms(rfc3339: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(rfc3339)
         .ok()
         .map(|dt| dt.with_timezone(&Utc).timestamp_millis())
 }
 
-// ---- message.data / part.data / meta_json 的线上形态 ----
+// ---- Wire shapes of message.data / part.data / meta_json ----
 
-/// message.data 公共时间字段:user 只有 created,assistant 另带 completed。
+/// Shared time fields of message.data: user has only created; assistant also
+/// carries completed.
 #[derive(Serialize)]
 struct WireTime {
     created: i64,
@@ -395,7 +423,8 @@ struct WireUserModel<'a> {
 #[derive(Serialize)]
 struct WireEnvInfo<'a> {
     cwd: &'a str,
-    /// 迁移发生时的平台;源机器的其余环境信息不可知,不臆造。
+    /// The platform at migration time; the source machine's remaining
+    /// environment is unknowable, so don't fabricate it.
     platform: &'a str,
 }
 
@@ -449,7 +478,8 @@ struct WirePath<'a> {
 struct WireAssistantMessageData<'a> {
     role: &'a str,
     time: WireTime,
-    /// 前一条消息的 id,构成链;首条消息不带该字段。
+    /// The previous message's id, forming the chain; the first message omits
+    /// the field.
     #[serde(rename = "parentID", skip_serializing_if = "Option::is_none")]
     parent_id: Option<&'a str>,
     #[serde(rename = "modelID")]
@@ -479,8 +509,9 @@ struct WireTextPartData<'a> {
     time: WireTimeStartEnd,
 }
 
-/// tasks.meta_json:桌面列表展示用的冗余快照,字段与真机观测一致。
-/// traceId 为必填(缺失则 ZCode 加载校验失败,整行被丢弃)。
+/// tasks.meta_json: a redundant snapshot for the desktop list display, with
+/// fields matching real-device observations. traceId is mandatory (if absent,
+/// ZCode's load-time validation fails and the whole row is dropped).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskMeta<'a> {
@@ -496,7 +527,7 @@ struct TaskMeta<'a> {
     status: &'a str,
 }
 
-/// user message.data:真实用户发言,带环境快照。
+/// user message.data: a real user utterance, with an environment snapshot.
 fn serialize_user_message(project_dir: &str, ts_ms: i64) -> String {
     let data = WireUserMessageData {
         role: "user",
@@ -527,7 +558,8 @@ fn serialize_user_message(project_dir: &str, ts_ms: i64) -> String {
     serde_json::to_string(&data).expect("serialize zcode user message")
 }
 
-/// assistant message.data:模型回复;token/cost 计数迁移时不可知,置零。
+/// assistant message.data: the model's reply; token/cost counts are
+/// unknowable at migration time and set to zero.
 fn serialize_assistant_message(project_dir: &str, ts_ms: i64, parent_id: Option<&str>) -> String {
     let data = WireAssistantMessageData {
         role: "assistant",
@@ -554,7 +586,8 @@ fn serialize_assistant_message(project_dir: &str, ts_ms: i64, parent_id: Option<
         finish: FINISH,
         semantics: WireSemantics {
             origin: "system",
-            // 精确枚举值未观测到,此值经实验验证 UI 可正常显示
+            // The exact enum value was never observed; this one was verified
+            // experimentally to render correctly in the UI
             kind: "model_response",
             ui_visibility: "visible",
             provider_visibility: "visible",
@@ -564,7 +597,7 @@ fn serialize_assistant_message(project_dir: &str, ts_ms: i64, parent_id: Option<
     serde_json::to_string(&data).expect("serialize zcode assistant message")
 }
 
-/// part.data:合并后的全文以单一 text part 落库。
+/// part.data: the fully merged text is persisted as a single text part.
 fn text_part_json(text: &str, ts_ms: i64) -> String {
     let data = WireTextPartData {
         kind: "text",
@@ -608,14 +641,14 @@ mod tests {
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// 与真机一致的 cli 库最小表结构(列名精确)。
+    /// Minimal cli-database schema matching the real device (exact column names).
     const CLI_DDL: &str = "
         CREATE TABLE session(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT NOT NULL, version TEXT NOT NULL, share_url TEXT, summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER, summary_diffs TEXT, revert TEXT, permission TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_compacting INTEGER, time_archived INTEGER, task_type TEXT NOT NULL DEFAULT 'interactive', title_source TEXT NOT NULL DEFAULT 'generated', title_message_id TEXT, time_title_updated INTEGER, trace_id TEXT);
         CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
         CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
         CREATE TABLE schema_migration(id TEXT PRIMARY KEY, checksum TEXT NOT NULL, app_version TEXT, time_applied INTEGER NOT NULL);
     ";
-    /// 与真机一致的桌面任务列表库最小表结构。
+    /// Minimal desktop task-list database schema matching the real device.
     const TASKS_DDL: &str = "
         CREATE TABLE tasks(workspace_key TEXT NOT NULL, workspace_path TEXT NOT NULL, workspace_identity TEXT, task_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', task_status TEXT, provider TEXT, mode TEXT NOT NULL DEFAULT 'build', model TEXT, migration_source TEXT, forked_from_task_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, unread_at INTEGER, last_unread_at INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, title_overridden INTEGER NOT NULL DEFAULT 0, meta_json TEXT NOT NULL DEFAULT '{}', searchable_text TEXT NOT NULL DEFAULT '', cron_automation_id TEXT, off_peak_task_id TEXT, PRIMARY KEY(workspace_key, task_id));
     ";
@@ -629,7 +662,8 @@ mod tests {
             .timestamp_millis()
     }
 
-    /// uuid 递增:第 1 个给会话,其后逐消息(先 message 后 part);时间恒定。
+    /// Incrementing uuids: the 1st goes to the session, then one per message
+    /// (message first, then part); time is constant.
     struct CountingIdGen {
         counter: AtomicUsize,
     }
@@ -662,12 +696,13 @@ mod tests {
         format!("00000000-0000-4000-8000-{n:012}")
     }
 
-    /// 建一个带 0018 迁移记录的空 cli 库。
+    /// Build an empty cli database carrying an 0018 migration record.
     fn build_cli_db(dir: &tempfile::TempDir) -> PathBuf {
         build_cli_db_with_migration(dir, "0018_baseline")
     }
 
-    /// 建指定最新迁移 id 的 cli 库(测试不受支持的版本用)。
+    /// Build a cli database with the given latest migration id (for testing
+    /// unsupported versions).
     fn build_cli_db_with_migration(dir: &tempfile::TempDir, migration: &str) -> PathBuf {
         let path = dir.path().join("db.sqlite");
         let conn = Connection::open(&path).unwrap();
@@ -713,7 +748,7 @@ mod tests {
         }
     }
 
-    /// 双库典型 IR:user 文本 + assistant(推理+文本)。
+    /// Typical IR across both databases: user text + assistant (reasoning + text).
     fn sample_ir() -> UnifiedSession {
         ir_with(
             "/Users/x/MyProj",
@@ -758,8 +793,9 @@ mod tests {
     }
 
     // ---------- TC-ZWRITE-01 ----------
-    /// 双库写入后的逐字段断言:session 行、message 链 parentID、
-    /// part data JSON、tasks 行、workspace_key、meta_json。
+    /// Field-by-field assertions after the dual-database write: the session
+    /// row, the message chain parentID, part data JSON, the tasks row,
+    /// workspace_key, and meta_json.
     #[test]
     fn tc_zwrite_01_both_dbs_full_shape() {
         let dir = tempfile::tempdir().unwrap();
@@ -772,7 +808,7 @@ mod tests {
         assert_eq!(sid, format!("sess_{}", uuid(1)));
         assert_eq!(out.resume_command, "");
 
-        // ---- session 行 ----
+        // ---- session row ----
         let conn = Connection::open(&cli_db).unwrap();
         let (
             project_id,
@@ -821,14 +857,14 @@ mod tests {
         assert_eq!(slug, sid);
         assert_eq!(directory, "/Users/x/MyProj");
         assert_eq!(title, "迁移会话");
-        assert_eq!(version, "1.4.2"); // 沿用库内迁移记录的应用版本
-        assert_eq!(time_created, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻(顶部可见)
-        assert_eq!(time_updated, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
-        assert_eq!(time_archived, None); // 未归档,桌面端才可见
+        assert_eq!(version, "1.4.2"); // follows the database's migration-record app version
+        assert_eq!(time_created, ms("2026-09-11T00:00:00.000Z")); // migration moment (visible at top)
+        assert_eq!(time_updated, ms("2026-09-11T00:00:00.000Z")); // migration moment
+        assert_eq!(time_archived, None); // not archived, so the desktop app shows it
         assert_eq!(task_type, "interactive");
         assert_eq!(title_source, "generated");
 
-        // ---- message 行:链式 parentID、角色、时间 ----
+        // ---- message rows: chained parentID, roles, times ----
         let messages: Vec<(String, i64, String)> = conn
             .prepare(
                 "SELECT id, sequence, data FROM message WHERE session_id = ?1 \
@@ -867,7 +903,8 @@ mod tests {
         assert_eq!(m2["tokens"]["input"], 0);
         assert_eq!(m2["semantics"]["kind"], "model_response");
 
-        // ---- part 行:每条消息恰好一个 text part,内容为统一合并结果 ----
+        // ---- part rows: exactly one text part per message, content being the
+        // unified merge result ----
         let parts: Vec<(String, String, i64, String)> = conn
             .prepare(
                 "SELECT id, message_id, sequence, data FROM part WHERE session_id = ?1 \
@@ -894,11 +931,11 @@ mod tests {
         assert_eq!(p2_msg, m2_id);
         assert_eq!(*p2_seq, 0);
         let p2: Value = serde_json::from_str(p2_data).unwrap();
-        // 合并规则与 mapper::render_parts 一致:推理做前缀
+        // Merging rules match mapper::render_parts: reasoning as a prefix
         assert_eq!(p2["text"], "> 内部推理:想一想\n\n回答一");
         drop(conn);
 
-        // ---- tasks 行 ----
+        // ---- tasks row ----
         let tasks_conn = Connection::open(&tasks_db).unwrap();
         let (ws_key, ws_path, task_id, task_title, status, provider, mode, model): (
             String,
@@ -928,12 +965,12 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(ws_key, "/Users/x/MyProj"); // workspace_key = 项目绝对路径
+        assert_eq!(ws_key, "/Users/x/MyProj"); // workspace_key = absolute project path
         assert_eq!(ws_path, "/Users/x/MyProj");
-        assert_eq!(task_id, sid); // task_id 必须等于 session.id
+        assert_eq!(task_id, sid); // task_id must equal session.id
         assert_eq!(task_title, "迁移会话");
         assert_eq!(status, "completed");
-        assert_eq!(provider, "glm"); // 必须是 ZCode 校验枚举之一
+        assert_eq!(provider, "glm"); // must be one of ZCode's validated enums
         assert_eq!(mode, "build");
         assert_eq!(model, "GLM-5.3-Flash");
         let (created_at, updated_at, last_unread, pinned, archived, deleted, title_overridden): (
@@ -962,8 +999,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(created_at, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
-        assert_eq!(updated_at, ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
+        assert_eq!(created_at, ms("2026-09-11T00:00:00.000Z")); // migration moment
+        assert_eq!(updated_at, ms("2026-09-11T00:00:00.000Z")); // migration moment
         assert_eq!(
             (last_unread, pinned, archived, deleted, title_overridden),
             (0, 0, 0, 0, 0)
@@ -980,12 +1017,13 @@ mod tests {
         assert_eq!(meta["taskId"], sid);
         assert_eq!(meta["title"], "迁移会话");
         assert_eq!(meta["workspacePath"], "/Users/x/MyProj");
-        assert_eq!(meta["createdAt"], ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
-        assert_eq!(meta["updatedAt"], ms("2026-09-11T00:00:00.000Z")); // 迁移时刻
+        assert_eq!(meta["createdAt"], ms("2026-09-11T00:00:00.000Z")); // migration moment
+        assert_eq!(meta["updatedAt"], ms("2026-09-11T00:00:00.000Z")); // migration moment
         assert_eq!(meta["mode"], "build");
         assert_eq!(meta["model"], "GLM-5.3-Flash");
         assert_eq!(meta["provider"], "glm");
-        // traceId 为 ZCode 加载校验必填(缺失整行被静默丢弃)
+        // traceId is mandatory for ZCode's load validation (if absent, the
+        // whole row is silently dropped)
         assert!(
             meta["traceId"].is_string() && !meta["traceId"].as_str().unwrap().is_empty(),
             "meta_json 必须含非空 traceId"
@@ -994,7 +1032,8 @@ mod tests {
     }
 
     // ---------- TC-ZWRITE-02 ----------
-    /// 幂等:同 id 二次写入报 TargetExists,两库数据不变,且不产生新备份。
+    /// Idempotency: a second write with the same id reports TargetExists,
+    /// both databases stay unchanged, and no new backups are created.
     #[test]
     fn tc_zwrite_02_idempotent_target_exists_data_unchanged() {
         let dir = tempfile::tempdir().unwrap();
@@ -1006,7 +1045,8 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, HubError::TargetExists(_)));
 
-        // 数据完全不变:cli 库仍 1 session / 2 message / 2 part,tasks 库仍 1 行
+        // Data completely unchanged: the cli database still has 1 session /
+        // 2 messages / 2 parts; the tasks database still 1 row
         let conn = Connection::open(&cli_db).unwrap();
         assert_eq!(count(&conn, "session"), 1);
         assert_eq!(count(&conn, "message"), 2);
@@ -1016,17 +1056,19 @@ mod tests {
         assert_eq!(count(&tasks_conn, "tasks"), 1);
         drop(tasks_conn);
 
-        // 幂等拒绝发生在备份之前:仍然只有第一次写入产生的 1 份备份
+        // The idempotent rejection happens before the backup: still only the
+        // 1 backup created by the first write
         assert_eq!(backup_files(dir.path(), "db.sqlite").len(), 1);
         assert_eq!(backup_files(dir.path(), "tasks-index.sqlite").len(), 1);
     }
 
     // ---------- TC-ZWRITE-03 ----------
-    /// schema 不认识(更高版本/无记录)拒绝写入,且无任何落库与备份;
-    /// 目标库文件不存在同样拒绝。
+    /// An unrecognized schema (newer version / no records) is rejected with
+    /// no writes and no backups; a missing target database file is rejected
+    /// the same way.
     #[test]
     fn tc_zwrite_03_unsupported_schema_and_missing_db_rejected() {
-        // 未来版本 0099:拒绝
+        // A future version 0099: rejected
         let dir = tempfile::tempdir().unwrap();
         let cli_db = build_cli_db_with_migration(&dir, "0099_future_schema");
         let tasks_db = build_tasks_db(&dir);
@@ -1044,7 +1086,7 @@ mod tests {
             "拒绝时不产生备份"
         );
 
-        // schema_migration 有表无记录:同样拒绝
+        // schema_migration table present but no records: rejected as well
         let dir2 = tempfile::tempdir().unwrap();
         let cli_db2 = {
             let path = dir2.path().join("db.sqlite");
@@ -1062,7 +1104,8 @@ mod tests {
             other => panic!("期望 SchemaUnsupported,得到 {other:?}"),
         }
 
-        // 目标库文件不存在:拒绝,且不得顺手创建新库
+        // Missing target database file: rejected, and must not create a new
+        // database on the side
         let dir3 = tempfile::tempdir().unwrap();
         let missing_cli = dir3.path().join("db.sqlite");
         let tasks_db3 = build_tasks_db(&dir3);
@@ -1090,20 +1133,22 @@ mod tests {
             Err(HubError::InvalidInput(_))
         ));
         assert!(!missing_tasks.exists());
-        // cli 库未被触碰
+        // The cli database was never touched
         let conn4 = Connection::open(&cli_db4).unwrap();
         assert_eq!(count(&conn4, "session"), 0);
     }
 
     // ---------- TC-ZWRITE-04 ----------
-    /// 备份:两个库写入前各复制一份 `<原名>.hub-backup-<时间戳>`,
-    /// 内容等于写入前的原文件字节。
+    /// Backup: both databases are copied to `<original
+    /// name>.hub-backup-<timestamp>` before writing; the contents equal the
+    /// original file's bytes before the write.
     #[test]
     fn tc_zwrite_04_backup_files_created_from_pre_write_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let cli_db = build_cli_db(&dir);
         let tasks_db = build_tasks_db(&dir);
-        // 让两个库内容非空,备份才有比对意义
+        // Give both databases non-empty contents so the backup comparison is
+        // meaningful
         {
             let tasks_conn = Connection::open(&tasks_db).unwrap();
             tasks_conn
@@ -1132,8 +1177,9 @@ mod tests {
     }
 
     // ---------- TC-ZWRITE-05 ----------
-    /// 输入防线:project_dir 为空报 InvalidInput;
-    /// 全部消息为空报 EmptySession。两者都发生在触碰库文件之前。
+    /// Input defenses: an empty project_dir reports InvalidInput; a session
+    /// with all messages empty reports EmptySession. Both happen before any
+    /// database file is touched.
     #[test]
     fn tc_zwrite_05_invalid_input_and_empty_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -1151,7 +1197,7 @@ mod tests {
             write_session_with(&empty, &cli_db, &tasks_db, &CountingIdGen::new()),
             Err(HubError::EmptySession(_))
         ));
-        // 全部消息合并后为空同样拒绝
+        // All messages empty after merging: rejected just the same
         let all_blank = ir_with(
             "/tmp/p",
             "标题",
@@ -1165,7 +1211,8 @@ mod tests {
             Err(HubError::EmptySession(_))
         ));
 
-        // 空消息被跳过,其余消息照常落库,parentID 链不断裂
+        // Blank messages are skipped; the remaining messages persist as usual
+        // and the parentID chain stays unbroken
         let with_blank = ir_with(
             "/tmp/p",
             "标题",
@@ -1190,14 +1237,16 @@ mod tests {
     }
 
     // ---------- TC-ZWRITE-06 ----------
-    /// 事务回滚:cli 库写入中途失败(主键冲突模拟),session/message/part
-    /// 整体回滚,tasks 库也未被写入。
+    /// Transaction rollback: a mid-write failure in the cli database
+    /// (simulated with a primary-key conflict) rolls back
+    /// session/message/part entirely; the tasks database is never written.
     #[test]
     fn tc_zwrite_06_transaction_rollback_on_midway_failure() {
         let dir = tempfile::tempdir().unwrap();
         let cli_db = build_cli_db(&dir);
         let tasks_db = build_tasks_db(&dir);
-        // 预置一条与写入方第一条消息同 id 的行(CountingIdGen 的第 2 个 uuid)
+        // Pre-plant a row with the same id as the writer's first message
+        // (CountingIdGen's 2nd uuid)
         {
             let conn = Connection::open(&cli_db).unwrap();
             conn.execute(
@@ -1218,7 +1267,8 @@ mod tests {
         let result = write_session_with(&sample_ir(), &cli_db, &tasks_db, &CountingIdGen::new());
         assert!(result.is_err(), "主键冲突必须报错");
 
-        // cli 库:新会话整体回滚,只剩预置数据
+        // cli database: the new session rolled back entirely; only the
+        // pre-planted data remains
         let conn = Connection::open(&cli_db).unwrap();
         assert_eq!(count(&conn, "session"), 1);
         assert_eq!(count(&conn, "message"), 1);
@@ -1232,13 +1282,13 @@ mod tests {
             .unwrap();
         assert_eq!(not_migrated, 0, "失败的会话行没有写入");
         drop(conn);
-        // tasks 库:cli 事务失败后不再触碰
+        // tasks database: never touched after the cli transaction failed
         let tasks_conn = Connection::open(&tasks_db).unwrap();
         assert_eq!(count(&tasks_conn, "tasks"), 0);
     }
 
     // ---------- TC-ZWRITE-07 ----------
-    /// 消息 timestamp 缺失时用 IdGen 的当前时刻兜底。
+    /// A missing message timestamp falls back to the IdGen's current time.
     #[test]
     fn tc_zwrite_07_missing_timestamp_falls_back_to_now() {
         let dir = tempfile::tempdir().unwrap();
@@ -1268,7 +1318,8 @@ mod tests {
         assert_eq!(created, now);
         let value: Value = serde_json::from_str(&data).unwrap();
         assert_eq!(value["time"]["created"], now);
-        // 会话创建时间同样取兜底时刻(首条消息无时间戳)
+        // The session creation time is the migration moment by design (which
+        // is also the fallback time here, as the first message has no timestamp)
         let session_created: i64 = conn
             .query_row(
                 "SELECT time_created FROM session WHERE id = ?1",

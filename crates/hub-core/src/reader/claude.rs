@@ -1,7 +1,8 @@
-//! Claude Code 会话 JSONL 解析。
+//! Claude Code session JSONL parsing.
 //!
-//! 源形态:`~/.claude/projects/<proj-dir>/<sessionId>.jsonl`,逐行 JSON 事件流。
-//! 坏行跳过并计数;sidechain 行跳过;system 等其他 type 忽略。
+//! Source layout: `~/.claude/projects/<proj-dir>/<sessionId>.jsonl`, a
+//! line-delimited JSON event stream. Bad lines are skipped and counted;
+//! sidechain lines are skipped; other types such as system are ignored.
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,14 +14,16 @@ use serde_json::Value;
 use crate::error::HubError;
 use crate::ir::{Role, SessionSummary, UnifiedMessage, UnifiedPart, UnifiedSession};
 
-/// 标题截断长度。
+/// Title truncation length.
 const TITLE_MAX_CHARS: usize = 50;
 
-/// 扫描 root(通常 ~/.claude/projects)下所有 *.jsonl,按 last_active 倒序,
-/// 同刻 tie-break 按 session_id 字典序。
+/// Scan all *.jsonl under root (usually ~/.claude/projects), ordered by
+/// last_active descending, tie-broken at equal timestamps by session_id
+/// lexicographic order.
 ///
-/// 单个文件读取失败(含空会话)时跳过该文件,不影响整体扫描;
-/// root 本身不存在时报 SourceNotFound。
+/// A single file failing to read (including empty sessions) is skipped
+/// without affecting the overall scan; if root itself does not exist,
+/// SourceNotFound is returned.
 pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     if !root.is_dir() {
         return Err(HubError::SourceNotFound(root.to_path_buf()));
@@ -41,8 +44,9 @@ pub fn scan_sessions(root: &Path) -> Result<Vec<SessionSummary>, HubError> {
     Ok(summaries)
 }
 
-/// 解析单个会话文件为 IR。坏行跳过并计数;sidechain 跳过;
-/// 无任何 user/assistant 消息时报 EmptySession。
+/// Parse a single session file into IR. Bad lines are skipped and counted;
+/// sidechains are skipped; EmptySession is returned when no user/assistant
+/// message remains.
 pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     if !path.is_file() {
         return Err(HubError::SourceNotFound(path.to_path_buf()));
@@ -53,7 +57,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     let mut parse_warnings = 0usize;
     let mut project_dir = String::new();
     let mut last_active_line_ts: Option<String> = None;
-    // tool_use_id → 工具名,用于把 tool_result 块关联到对应工具名
+    // tool_use_id → tool name, used to link a tool_result block back to its tool
     let mut tool_names: HashMap<String, String> = HashMap::new();
 
     for raw_line in content.lines() {
@@ -68,11 +72,11 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
                 continue;
             }
         };
-        // sidechain 行跳过(不计 warning、不计消息、不计 last_active)
+        // Sidechain lines are skipped (no warning, no message, no last_active)
         if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
             continue;
         }
-        // project_dir 一律取首个非空行内 cwd
+        // project_dir always comes from the first non-empty inline cwd
         if project_dir.is_empty() {
             if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
                 if !cwd.is_empty() {
@@ -83,7 +87,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
         let role = match value.get("type").and_then(Value::as_str) {
             Some("user") => Role::User,
             Some("assistant") => Role::Assistant,
-            _ => continue, // system / file-history-snapshot / mode / 其他:忽略,不计 warning
+            _ => continue, // system / file-history-snapshot / mode / others: ignore, no warning
         };
         let line_ts = value
             .get("timestamp")
@@ -93,13 +97,15 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
             Some(Value::String(s)) => vec![UnifiedPart::Text(strip_ansi(s))],
             Some(Value::Array(blocks)) => parse_blocks(blocks, &mut tool_names),
             _ => {
-                // user/assistant 行但 message.content 形态无法解读:按坏行计
+                // A user/assistant line whose message.content shape cannot be
+                // interpreted: count as a bad line
                 parse_warnings += 1;
                 continue;
             }
         };
-        // 本地命令包装消息(<command-name>/<local-command-*>)是终端注入的回显,
-        // 不是用户真实发言:预览与迁移都跳过整条。
+        // Local-command wrapper messages (<command-name>/<local-command-*>)
+        // are terminal-injected echoes, not real user speech: skip them
+        // entirely in both preview and migration.
         let is_command_echo = role == Role::User
             && !parts.is_empty()
             && parts.iter().all(|p| match p {
@@ -123,7 +129,8 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
         return Err(HubError::EmptySession(path.to_path_buf()));
     }
 
-    // 最后一条 user/assistant 行 timestamp;缺失 fallback 文件 mtime(RFC3339)
+    // Timestamp of the last user/assistant line; fall back to the file mtime
+    // (RFC3339) when missing
     let last_active = match last_active_line_ts {
         Some(ts) => ts,
         None => mtime_rfc3339(path)?,
@@ -147,7 +154,7 @@ pub fn read_session(path: &Path) -> Result<UnifiedSession, HubError> {
     })
 }
 
-/// 逐块解析 content 数组。未知块类型忽略。
+/// Parse a content array block by block. Unknown block types are ignored.
 fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> Vec<UnifiedPart> {
     let mut parts = Vec::new();
     for block in blocks {
@@ -158,7 +165,8 @@ fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> V
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             ))),
-            // thinking 明文保留为 Reasoning,signature 不进入 IR
+            // thinking plaintext is kept as Reasoning; the signature never
+            // enters the IR
             Some("thinking") => parts.push(UnifiedPart::Reasoning(strip_ansi(
                 block
                     .get("thinking")
@@ -204,7 +212,8 @@ fn parse_blocks(blocks: &[Value], tool_names: &mut HashMap<String, String>) -> V
     parts
 }
 
-/// tool_result 的 content 形态:string 或 [text 块] 数组;其他以 JSON 文本兜底。
+/// tool_result content shapes: a string, or an array of [text blocks];
+/// anything else falls back to its JSON text.
 fn extract_result_content(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
@@ -218,9 +227,11 @@ fn extract_result_content(content: Option<&Value>) -> String {
     }
 }
 
-/// 首条 user 文本前 50 个 char(不足全取);无 user 文本用 "untitled"。
-/// 跳过工具注入的包装文本(本地命令提示、中断标记等),它们不是用户真正说的话。
-/// (reader::codex 复用同一规则,故对 crate 内可见。)
+/// First 50 chars (or fewer) of the first user text; "untitled" when there
+/// is no user text.
+/// Skips tool-injected wrapper text (local-command notices, interrupt
+/// markers, etc.) — those are not what the user actually said.
+/// (reader::codex reuses the same rule, hence crate-visible.)
 pub(crate) fn title_of(messages: &[UnifiedMessage]) -> String {
     for message in messages {
         if message.role != Role::User {
@@ -245,19 +256,20 @@ pub(crate) fn title_of(messages: &[UnifiedMessage]) -> String {
     "untitled".to_string()
 }
 
-/// 判断 user 文本是否为终端注入的本地命令包装/回显。
+/// Whether a user text is a terminal-injected local-command wrapper/echo.
 fn is_local_command_text(text: &str) -> bool {
     let t = text.trim_start();
     t.starts_with("<command-") || t.starts_with("<local-command")
 }
 
-/// 剥离 ANSI 转义序列(如 `\x1b[1m`),它们在界面与迁移产物中都是乱码。
+/// Strip ANSI escape sequences (e.g. `\x1b[1m`); they are mojibake both in
+/// the UI and in migration artifacts.
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // 消费 '['
+            chars.next(); // consume '['
             while let Some(&n) = chars.peek() {
                 if n.is_ascii_digit() || n == ';' || n == '?' {
                     chars.next();
@@ -265,7 +277,7 @@ fn strip_ansi(text: &str) -> String {
                     break;
                 }
             }
-            chars.next(); // 消费终结字母(m/A/K 等)
+            chars.next(); // consume the terminating letter (m/A/K, etc.)
         } else {
             out.push(c);
         }
@@ -273,7 +285,8 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// 文件 mtime(RFC3339,UTC 毫秒)。reader::codex 的 last_active 兜底复用。
+/// File mtime (RFC3339, UTC milliseconds). Reused as the last_active
+/// fallback by reader::codex.
 pub(crate) fn mtime_rfc3339(path: &Path) -> Result<String, HubError> {
     let modified = fs::metadata(path)?.modified()?;
     Ok(DateTime::<Utc>::from(modified).to_rfc3339_opts(SecondsFormat::Millis, true))
@@ -285,15 +298,16 @@ fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HubErro
         let path = entry.path();
         if entry.file_type()?.is_dir() {
             collect_jsonl_files(&path, out)?;
-        } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+        } else if path.extension().is_some_and(|e| e == "jsonl") {
             out.push(path);
         }
     }
     Ok(())
 }
 
-/// 排序键:last_active 解析为 UTC 毫秒;不可解析视为最小值。
-/// reader::codex 的扫描排序复用同一键。
+/// Sort key: last_active parsed as UTC milliseconds; unparseable values
+/// count as the minimum.
+/// reader::codex reuses the same key for its scan ordering.
 pub(crate) fn sort_key(summary: &SessionSummary) -> i64 {
     DateTime::parse_from_rfc3339(&summary.last_active)
         .map(|d| d.with_timezone(&Utc).timestamp_millis())
@@ -311,7 +325,8 @@ mod tests {
             .join(name)
     }
 
-    /// 在 tempdir 下写一个单行 user 会话文件(扫描排序用)。
+    /// Write a single-line user session file under a tempdir (for scan
+    /// ordering tests).
     fn write_session_file(
         root: &Path,
         project: &str,
@@ -355,18 +370,18 @@ mod tests {
             session.messages[1].parts,
             vec![UnifiedPart::Text("好的,这是回答。".to_string())]
         );
-        // 标题 = 首条 user 文本(18 char < 50,全取)
+        // Title = first user text (18 chars < 50, kept in full)
         assert_eq!(session.summary.title, "第一个问题:你好,帮我看一下这个项目");
-        // project_dir = 行内 cwd
+        // project_dir = inline cwd
         assert_eq!(session.summary.project_dir, "/tmp/proj-alpha");
-        // 最后一条 user/assistant 行 timestamp
+        // Timestamp of the last user/assistant line
         assert_eq!(session.summary.last_active, "2026-09-10T10:00:05.000Z");
         assert_eq!(session.summary.message_count, 2);
         assert_eq!(session.summary.session_id, "minimal");
         assert_eq!(session.summary.source_path, fixture("minimal.jsonl"));
     }
 
-    // ---------- TC-READ-01(标题 50 char 截断)----------
+    // ---------- TC-READ-01 (title truncated to 50 chars) ----------
     #[test]
     fn tc_read_01_title_truncated_to_50_chars() {
         let dir = tempfile::tempdir().unwrap();
@@ -389,7 +404,7 @@ mod tests {
         let session = read_session(&fixture("rich.jsonl")).unwrap();
         assert_eq!(session.messages.len(), 4);
 
-        // assistant 行:thinking → Reasoning、text → Text、tool_use → ToolCall
+        // assistant line: thinking → Reasoning, text → Text, tool_use → ToolCall
         let assistant = &session.messages[1];
         assert_eq!(
             assistant.parts,
@@ -403,7 +418,8 @@ mod tests {
             ]
         );
 
-        // user 行:tool_result → ToolResult(tool 名由 tool_use_id 关联回 tool_use)
+        // user line: tool_result → ToolResult (tool name linked back via
+        // tool_use_id to the tool_use)
         let tool_result_msg = &session.messages[2];
         assert_eq!(
             tool_result_msg.parts,
@@ -414,7 +430,7 @@ mod tests {
             }]
         );
 
-        // signature 不进入 IR(任何形式都不可见)
+        // The signature never enters the IR (invisible in any form)
         let serialized = serde_json::to_string(&session).unwrap();
         assert!(!serialized.contains("sig-should-not-appear"));
     }
@@ -422,9 +438,10 @@ mod tests {
     #[test]
     fn tc_read_03_bad_line_and_sidechain() {
         let session = read_session(&fixture("rich.jsonl")).unwrap();
-        // 坏 JSON 行恰好 1 行 → parse_warnings = 1
+        // Exactly one bad JSON line → parse_warnings = 1
         assert_eq!(session.parse_warnings, 1);
-        // sidechain 行不产生消息、不计 warning(否则消息数为 5)
+        // Sidechain lines produce no message and no warning (otherwise the
+        // message count would be 5)
         assert_eq!(session.messages.len(), 4);
         let serialized = serde_json::to_string(&session).unwrap();
         assert!(!serialized.contains("sidechain 分支消息"));
@@ -434,7 +451,8 @@ mod tests {
     #[test]
     fn tc_read_04_scan_orders_by_last_active_desc() {
         let root = tempfile::tempdir().unwrap();
-        // 4 个会话跨 2 个项目目录;aaa 与 zzz 同刻,tie-break 按 session_id 字典序
+        // 4 sessions across 2 project dirs; aaa and zzz share a timestamp,
+        // tie-broken by session_id lexicographic order
         write_session_file(root.path(), "pa", "ccc", "2026-09-10T10:00:00.000Z");
         write_session_file(root.path(), "pa", "aaa", "2026-09-10T12:00:00.000Z");
         write_session_file(root.path(), "pb", "bbb", "2026-09-10T11:00:00.000Z");
@@ -504,7 +522,8 @@ mod tests {
     }
 
     // ---------- TC-READ-09 ----------
-    /// 标题提取跳过本地命令包装文本,取第一条真实用户消息。
+    /// Title extraction skips local-command wrapper text and takes the first
+    /// real user message.
     #[test]
     fn tc_read_10_title_skips_command_wrappers() {
         let dir = tempfile::tempdir().unwrap();
@@ -521,8 +540,10 @@ mod tests {
         assert_eq!(session.summary.title, "帮我修一下登录页");
     }
 
-    /// 本地命令回显消息被整条跳过;文本中的 ANSI 转义序列被剥离。
-    /// 注:真实文件中 ESC 以 JSON 转义 `` 存储(裸控制字符在 JSON 中非法)。
+    /// Local-command echo messages are skipped entirely; ANSI escape
+    /// sequences in text are stripped.
+    /// Note: in real files ESC is stored as the JSON escape ``
+    /// (bare control characters are invalid in JSON).
     #[test]
     fn tc_read_11_command_echo_skipped_and_ansi_stripped() {
         let dir = tempfile::tempdir().unwrap();
@@ -541,9 +562,9 @@ mod tests {
             ],
         );
         let session = read_session(&path).unwrap();
-        // 命令回显被跳过,仅剩 2 条消息
+        // Command echo skipped; only 2 messages remain
         assert_eq!(session.messages.len(), 2);
-        // ANSI 转义序列剥离干净
+        // ANSI escape sequences stripped clean
         assert_eq!(
             session.messages[0].parts,
             vec![UnifiedPart::Text("Set model to glm-5.3".to_string())]
@@ -568,7 +589,8 @@ mod tests {
         );
         let session = read_session(&path).unwrap();
         assert!(session.messages.iter().all(|m| m.timestamp.is_none()));
-        // last_active 走 mtime fallback,输出为合法 RFC3339
+        // last_active comes from the mtime fallback; the output must be valid
+        // RFC3339
         assert!(DateTime::parse_from_rfc3339(&session.summary.last_active).is_ok());
     }
 }

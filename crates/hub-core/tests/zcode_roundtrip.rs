@@ -1,7 +1,9 @@
-//! 端到端集成测试:ZCode 读 → 写 → 读回全链路。
+//! End-to-end integration tests: the full ZCode read → write → read-back
+//! pipeline.
 //!
-//! 源库与目标库全部在 tempdir 内用 rusqlite 手写构造(最小表结构,列名与
-//! 真机一致),不触碰真实 ~/.zcode,不拷贝任何真实数据。
+//! Both the source and target databases are hand-built with rusqlite inside
+//! tempdirs (minimal table layouts with real-device column names); no real
+//! ~/.zcode is touched and no real data is copied.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,14 +14,14 @@ use hub_core::{
 };
 use rusqlite::{params, Connection};
 
-/// 与真机一致的 cli 库最小表结构(列名精确)。
+/// Minimal cli-database schema matching the real device (exact column names).
 const CLI_DDL: &str = "
     CREATE TABLE session(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, workspace_id TEXT, parent_id TEXT, slug TEXT NOT NULL, directory TEXT NOT NULL, path TEXT, title TEXT NOT NULL, version TEXT NOT NULL, share_url TEXT, summary_additions INTEGER, summary_deletions INTEGER, summary_files INTEGER, summary_diffs TEXT, revert TEXT, permission TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, time_compacting INTEGER, time_archived INTEGER, task_type TEXT NOT NULL DEFAULT 'interactive', title_source TEXT NOT NULL DEFAULT 'generated', title_message_id TEXT, time_title_updated INTEGER, trace_id TEXT);
     CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
     CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, sequence INTEGER);
     CREATE TABLE schema_migration(id TEXT PRIMARY KEY, checksum TEXT NOT NULL, app_version TEXT, time_applied INTEGER NOT NULL);
 ";
-/// 与真机一致的桌面任务列表库最小表结构。
+/// Minimal desktop task-list database schema matching the real device.
 const TASKS_DDL: &str = "
     CREATE TABLE tasks(workspace_key TEXT NOT NULL, workspace_path TEXT NOT NULL, workspace_identity TEXT, task_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', task_status TEXT, provider TEXT, mode TEXT NOT NULL DEFAULT 'build', model TEXT, migration_source TEXT, forked_from_task_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, unread_at INTEGER, last_unread_at INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, title_overridden INTEGER NOT NULL DEFAULT 0, meta_json TEXT NOT NULL DEFAULT '{}', searchable_text TEXT NOT NULL DEFAULT '', cron_automation_id TEXT, off_peak_task_id TEXT, PRIMARY KEY(workspace_key, task_id));
 ";
@@ -27,7 +29,8 @@ const TASKS_DDL: &str = "
 const FIXED_TS_FILE: &str = "2026-09-11T00-00-00";
 const FIXED_TS_COLON: &str = "2026-09-11T00:00:00.000Z";
 
-/// uuid 递增:第 1 个给会话,其后逐消息(先 message 后 part);时间恒定。
+/// Incrementing uuids: the 1st goes to the session, then one per message
+/// (message first, then part); time is constant.
 struct CountingIdGen {
     counter: AtomicUsize,
 }
@@ -93,9 +96,9 @@ fn insert_part(conn: &Connection, id: &str, message: &str, session: &str, seq: i
     .unwrap();
 }
 
-/// 构造一个含典型消息形态的源库:
-/// 目标会话(user 文本 / assistant 推理 / assistant 工具 / 界面事件 part),
-/// 外加一条归档会话(扫描应排除)。
+/// Build a source database containing typical message shapes:
+/// the target session (user text / assistant reasoning / assistant tool /
+/// UI-event parts), plus one archived session (which the scan must exclude).
 fn build_source_db(root: &Path) -> PathBuf {
     let db = root.join("db.sqlite");
     build_cli_db(&db);
@@ -121,7 +124,7 @@ fn build_source_db(root: &Path) -> PathBuf {
         )
         .unwrap();
 
-        // m1:user 文本(step-start 被跳过)
+        // m1: user text (the step-start is skipped)
         insert_message(
             &conn,
             "m1",
@@ -145,7 +148,8 @@ fn build_source_db(root: &Path) -> PathBuf {
             1,
             r#"{"type":"text","text":"你好,帮我看一下这个项目"}"#,
         );
-        // m2:assistant 推理(推理排在工具前,读取只取推理)
+        // m2: assistant reasoning (reasoning precedes the tool; reading takes
+        // only the reasoning)
         insert_message(
             &conn,
             "m2",
@@ -169,7 +173,8 @@ fn build_source_db(root: &Path) -> PathBuf {
             1,
             r#"{"type":"tool","callID":"call_1","tool":"Bash","state":{"status":"completed","input":{"command":"ls -la"},"output":"total 0"}}"#,
         );
-        // m3:assistant 工具(timeline 之后第一个可用 part 是工具)
+        // m3: assistant tool (the first usable part after the timeline is the
+        // tool)
         insert_message(
             &conn,
             "m3",
@@ -197,17 +202,18 @@ fn build_source_db(root: &Path) -> PathBuf {
     db
 }
 
-// ---------- TC-ZE2E-01:读 → 写 → 读回内容一致 ----------
+// ---------- TC-ZE2E-01: read → write → read-back, content preserved ----------
 
 #[test]
 fn tc_ze2e_01_roundtrip_content_preserved() {
     let src_dir = tempfile::tempdir().unwrap();
     let src_db = build_source_db(src_dir.path());
 
-    // 源库只读:迁移前后逐字节不变
+    // The source database is read-only: byte-for-byte identical before and
+    // after migration
     let src_bytes_before = fs::read(&src_db).unwrap();
 
-    // 扫描:归档会话被排除,只看到目标会话
+    // Scan: the archived session is excluded; only the target session shows
     let summaries = scan_zcode_sessions(&src_db).unwrap();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].session_id, "sess-live");
@@ -219,7 +225,7 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
     assert_eq!(source_ir.parse_warnings, 0);
     assert_eq!(fs::read(&src_db).unwrap(), src_bytes_before, "源库只读");
 
-    // 写入另一对全新临时库
+    // Write into a fresh pair of temporary databases
     let dst_dir = tempfile::tempdir().unwrap();
     let dst_cli = dst_dir.path().join("db.sqlite");
     let dst_tasks = dst_dir.path().join("tasks-index.sqlite");
@@ -238,7 +244,7 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
     assert!(out.session_id.starts_with("sess_"));
     assert_eq!(out.resume_command, "");
 
-    // 目标库生成备份
+    // The target databases got their backups
     assert!(dst_dir
         .path()
         .join(format!("db.sqlite.hub-backup-{FIXED_TS_FILE}"))
@@ -248,12 +254,15 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
         .join(format!("tasks-index.sqlite.hub-backup-{FIXED_TS_FILE}"))
         .is_file());
 
-    // 读回:内容与源一致(消息级)
+    // Read back: content matches the source (message level)
     let back = read_zcode_session(&dst_cli, &out.session_id).unwrap();
     assert_eq!(back.summary.session_id, out.session_id);
     assert_eq!(back.summary.project_dir, "/Users/x/MyProj");
     assert_eq!(back.summary.title, "源会话标题");
-    assert_eq!(back.summary.last_active, source_ir.summary.last_active);
+    // The writer deliberately sets session time_updated to the migration
+    // moment (so migrated sessions surface at the top of the task list);
+    // only per-message timestamps round-trip from the source.
+    assert_eq!(back.summary.last_active, FIXED_TS_COLON);
     assert_eq!(back.messages.len(), 3);
     assert_eq!(back.parse_warnings, 0);
 
@@ -263,7 +272,8 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
         vec![UnifiedPart::Text("你好,帮我看一下这个项目".to_string())]
     );
 
-    // 源消息 [reasoning] → 写入合并为 "> 内部推理:…\n\n" 文本 → 读回 Text
+    // Source message [reasoning] → written merged as "> 内部推理:…\n\n" text
+    // → read back as Text
     assert_eq!(back.messages[1].role, Role::Assistant);
     assert_eq!(
         back.messages[1].parts,
@@ -272,7 +282,8 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
         )]
     );
 
-    // 源消息 [tool] → 写入合并为 "[调用工具 …] <input>" 文本 → 读回 Text
+    // Source message [tool] → written merged as "[调用工具 …] <input>" text
+    // → read back as Text
     assert_eq!(back.messages[2].role, Role::Assistant);
     assert_eq!(
         back.messages[2].parts,
@@ -281,12 +292,13 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
         )]
     );
 
-    // 角色序列整体一致
+    // The role sequence as a whole matches
     let roles: Vec<Role> = back.messages.iter().map(|m| m.role).collect();
     let source_roles: Vec<Role> = source_ir.messages.iter().map(|m| m.role).collect();
     assert_eq!(roles, source_roles);
 
-    // tasks 行就位,workspace_key 指向项目路径
+    // The tasks row is in place, with workspace_key pointing at the project
+    // path
     let tasks_conn = Connection::open(&dst_tasks).unwrap();
     let (task_id, ws_key): (String, String) = tasks_conn
         .query_row("SELECT task_id, workspace_key FROM tasks", [], |r| {
@@ -296,7 +308,8 @@ fn tc_ze2e_01_roundtrip_content_preserved() {
     assert_eq!(task_id, out.session_id);
     assert_eq!(ws_key, "/Users/x/MyProj");
 
-    // 目标库扫描:迁移会话可见(未归档、未删除)
+    // Scanning the target databases: the migrated session is visible (not
+    // archived, not deleted)
     let dst_summaries = scan_zcode_sessions(&dst_cli).unwrap();
     assert_eq!(dst_summaries.len(), 1);
     assert_eq!(dst_summaries[0].session_id, out.session_id);

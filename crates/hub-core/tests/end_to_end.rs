@@ -1,8 +1,10 @@
-//! 端到端集成测试:read → write 全链路(TC-E2E-01/02)。
+//! End-to-end integration tests: the full read → write pipeline (TC-E2E-01/02).
 //!
-//! 归一化规则见:
-//! uuid v4 → `<UUID>`;RFC3339 时间戳(两种格式)→ `<TS>`;`"cwd":"<任意>"` → `"cwd":"<CWD>"`;
-//! 路径前缀 `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`。固定 IdGen 消除其余不确定性。
+//! Normalization rules:
+//! uuid v4 → `<UUID>`; RFC3339 timestamps (both formats) → `<TS>`;
+//! `"cwd":"<anything>"` → `"cwd":"<CWD>"`;
+//! path prefix `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`. A fixed IdGen removes all
+//! remaining nondeterminism.
 
 use std::fs;
 use std::path::PathBuf;
@@ -39,7 +41,7 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-// ---------- TC-E2E-01:黄金文件对比 + 源只读 ----------
+// ---------- TC-E2E-01: golden-file comparison + read-only source ----------
 
 #[test]
 fn tc_e2e_01_golden_compare_and_source_untouched() {
@@ -52,7 +54,7 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let out = write_session_with(&ir, tmp.path(), &FixedIdGen).unwrap();
 
-    // 产物路径形态:<root>/<DATE>/rollout-<ts>-<uuid>.jsonl
+    // Artifact path shape: <root>/<DATE>/rollout-<ts>-<uuid>.jsonl
     let rel = out
         .file_path
         .strip_prefix(tmp.path())
@@ -64,7 +66,7 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
         format!("<DATE>/rollout-{FIXED_TS_FILE}-{FIXED_UUID}.jsonl")
     );
 
-    // 源文件迁移前后 SHA-256 不变
+    // The source file's SHA-256 must be identical before and after migration
     let source_bytes_after = fs::read(&source).unwrap();
     let source_sha_after = hex(&sha256(&source_bytes_after));
     assert_eq!(
@@ -72,7 +74,8 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
         "源文件 SHA-256 迁移前后必须不变"
     );
 
-    // 归一化后与 golden 逐行语义对比
+    // Line-by-line semantic comparison against the golden file after
+    // normalization
     let artifact = fs::read_to_string(&out.file_path).unwrap();
     let golden = fs::read_to_string(fixture("golden-minimal.rollout.jsonl")).unwrap();
     let artifact_lines = normalized_lines(&artifact);
@@ -92,7 +95,7 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
     }
 }
 
-// ---------- TC-E2E-02:rich 全链路 ----------
+// ---------- TC-E2E-02: rich fixture full pipeline ----------
 
 #[test]
 fn tc_e2e_02_rich_pipeline_succeeds_with_warnings() {
@@ -104,7 +107,7 @@ fn tc_e2e_02_rich_pipeline_succeeds_with_warnings() {
     let out = write_session_with(&ir, tmp.path(), &FixedIdGen).unwrap();
     assert!(out.file_path.is_file());
 
-    // 全行合法 JSON 且 timestamp 均为 RFC3339
+    // Every line is valid JSON and every timestamp is RFC3339
     let artifact = fs::read_to_string(&out.file_path).unwrap();
     for line in artifact.lines() {
         let value: Value = serde_json::from_str(line).expect("每行合法 JSON");
@@ -112,15 +115,15 @@ fn tc_e2e_02_rich_pipeline_succeeds_with_warnings() {
         assert!(DateTime::parse_from_rfc3339(ts).is_ok(), "RFC3339: {ts}");
     }
 
-    // 文本化工具内容确实进入产物
+    // Textualized tool content really made it into the artifact
     assert!(artifact.contains("[调用工具 Bash]"));
     assert!(artifact.contains("[工具结果 Bash isError=false]"));
     assert!(artifact.contains("> 内部推理:"));
-    // sidechain 分支内容绝不出现
+    // Sidechain branch content must never appear
     assert!(!artifact.contains("sidechain 分支消息"));
 }
 
-// ---------- 归一化 ----------
+// ---------- Normalization ----------
 
 fn normalized_lines(content: &str) -> Vec<Value> {
     content
@@ -171,7 +174,7 @@ fn is_uuid_v4(s: &str) -> bool {
         && matches!(b[19], b'8' | b'9' | b'a' | b'b')
 }
 
-/// 路径前缀 `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`
+/// Path prefix `^\d{4}/\d{2}/\d{2}/` → `<DATE>/`
 fn normalize_path_prefix(path: &str) -> String {
     let b = path.as_bytes();
     let shape = |i: usize, n: usize| b[i..i + n].iter().all(|c| c.is_ascii_digit());
@@ -189,7 +192,8 @@ fn normalize_path_prefix(path: &str) -> String {
     }
 }
 
-// ---------- SHA-256(白名单外不加 sha2 crate,测试内手写标准实现) ----------
+// ---------- SHA-256 (no sha2 crate outside the allowlist; a standard
+// hand-rolled implementation inside the test) ----------
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -280,7 +284,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// 校验手写 SHA-256 与公开已知向量一致(防实现自错自证)。
+/// Verify the hand-rolled SHA-256 against public known vectors (so the
+/// implementation is not self-certifying).
 #[test]
 fn sha256_known_vectors() {
     assert_eq!(
@@ -291,7 +296,7 @@ fn sha256_known_vectors() {
         hex(&sha256(b"")),
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     );
-    // >64 字节跨块向量
+    // >64-byte cross-block vector
     assert_eq!(
         hex(&sha256(
             b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
@@ -300,11 +305,11 @@ fn sha256_known_vectors() {
     );
 }
 
-/// 归一化规则单元自检。
+/// Unit self-check of the normalization rules.
 #[test]
 fn normalization_helpers() {
     assert!(is_uuid_v4(FIXED_UUID));
-    assert!(!is_uuid_v4("00000000-0000-3000-8000-000000000001")); // 非 v4
+    assert!(!is_uuid_v4("00000000-0000-3000-8000-000000000001")); // not v4
     assert!(!is_uuid_v4("not-a-uuid"));
     assert_eq!(
         normalize_path_prefix("2026/09/11/x.jsonl"),

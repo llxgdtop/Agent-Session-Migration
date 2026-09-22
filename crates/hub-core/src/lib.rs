@@ -1,9 +1,11 @@
-//! Agent Session Hub 核心库(hub-core)。
+//! Agent Session Hub core library (hub-core).
 //!
-//! 三层数据流:reader(源解析)→ IR(统一中间表示)→ mapper/writer(目标生成)。
-//! 当前版本:Claude Code → Codex 迁移、Codex → Claude Code 反向迁移,
-//! 以及 ZCode(SQLite 双库)的读取与写入;
-//! launcher 附带迁移后的一键打开(Terminal / ZCode),safety 提供写入前进程护栏。
+//! Three-layer data flow: reader (source parsing) → IR (unified intermediate
+//! representation) → mapper/writer (target generation).
+//! Current version: Claude Code → Codex migration, the reverse Codex →
+//! Claude Code migration, plus ZCode (dual SQLite database) read and write;
+//! launcher provides post-migration one-click open (Terminal / ZCode), and
+//! safety provides the pre-write process guard.
 
 pub mod error;
 pub mod ir;
@@ -18,12 +20,14 @@ pub use ir::{Role, SessionSummary, Tool, UnifiedMessage, UnifiedPart, UnifiedSes
 pub use launcher::{claude_resume_command, codex_resume_command, open_in_terminal, open_zcode_app};
 pub use mapper::{map_session, CodexEvent};
 pub use safety::is_tool_running;
-// 两个 reader 暴露同名函数:根级沿用 Claude Code 版本(既有调用方),
-// Codex 版本以带工具名的别名导出;亦可用模块限定路径 reader::codex::*。
+// The readers expose identically named functions: the crate root keeps the
+// Claude Code versions (existing callers), while the Codex ones are exported
+// under tool-prefixed aliases; module-qualified paths reader::codex::* also work.
 pub use reader::claude::{read_session, scan_sessions};
 pub use reader::codex::{read_session as read_codex_session, scan_sessions as scan_codex_sessions};
 pub use reader::zcode::{read_session as read_zcode_session, scan_sessions as scan_zcode_sessions};
-// 两个 writer 同理:根级 write_session 仍指 Codex 版本。
+// Same idea for the two writers: the root-level write_session still refers to
+// the Codex version.
 pub use writer::claude::{
     write_session as write_claude_session, write_session_with as write_claude_session_with,
     ClaudeWriteOutput,

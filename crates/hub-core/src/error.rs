@@ -1,24 +1,26 @@
-//! 统一错误类型。
+//! Unified error type.
 
 use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum HubError {
-    /// 扫描根不存在 / 单个源文件不存在。
+    /// Scan root does not exist / a single source file does not exist.
     SourceNotFound(PathBuf),
-    /// 会话无 user/assistant 消息,或 map 后事件为空。
+    /// Session has no user/assistant messages, or the mapped event list is empty.
     EmptySession(PathBuf),
-    /// 目标 rollout 文件已存在。
+    /// Target rollout file already exists.
     TargetExists(PathBuf),
-    /// 目标目录创建失败/无权限。
+    /// Target directory could not be created / is not writable.
     NoWritableTarget(PathBuf),
-    /// 目标 ZCode 库的 schema_migration 版本不在已验证支持范围内,
-    /// 拒绝写入以免破坏新版本表结构。内容为发现的迁移 id。
+    /// The target ZCode database's schema_migration version is outside the
+    /// verified-supported range; refuse to write so a newer table layout is
+    /// never corrupted. Carries the discovered migration id.
     SchemaUnsupported(String),
-    /// 调用方传入的会话数据不满足写入前提(如缺少项目目录)。
+    /// Session data supplied by the caller violates a write precondition
+    /// (e.g. missing project directory).
     InvalidInput(String),
-    /// 其他 IO 错误。
+    /// Other IO errors.
     Io(std::io::Error),
 }
 
@@ -53,8 +55,9 @@ impl From<std::io::Error> for HubError {
     }
 }
 
-/// SQLite 错误并入 Io 变体:底层错误经 io::Error::other 保留完整 source 链,
-/// 供上层诊断(表缺失、约束冲突等)。
+/// Fold SQLite errors into the Io variant: the underlying error is preserved
+/// via io::Error::other with a full source chain, so upper layers can
+/// diagnose it (missing table, constraint violation, etc.).
 impl From<rusqlite::Error> for HubError {
     fn from(e: rusqlite::Error) -> Self {
         HubError::Io(std::io::Error::other(e))
@@ -65,7 +68,8 @@ impl From<rusqlite::Error> for HubError {
 mod tests {
     use super::*;
 
-    /// HubError 各变体可展示、携带路径,Io 透出底层 source。
+    /// Every HubError variant displays and carries its path; Io exposes the
+    /// underlying source.
     #[test]
     fn tc_ir_02_hub_error_display_and_source() {
         assert!(HubError::SourceNotFound(PathBuf::from("/no/such/dir"))
@@ -86,7 +90,8 @@ mod tests {
         assert!(std::error::Error::source(&e).is_some());
     }
 
-    /// ZCode 相关新变体:Display 文案可读,且 rusqlite 错误可自动转换并入 Io。
+    /// The newer ZCode variants: readable Display text, and rusqlite errors
+    /// convert automatically into Io.
     #[test]
     fn tc_err_03_zcode_variants_display_and_rusqlite_from() {
         let schema = HubError::SchemaUnsupported("0099_future_schema".to_string());
@@ -100,7 +105,8 @@ mod tests {
         assert!(text.contains("无法迁移"));
         assert!(text.contains("源会话缺少项目目录"));
 
-        // rusqlite 错误经 From 并入 Io,底层原因可从 source 链取回
+        // A rusqlite error folds into Io via From; the underlying reason stays
+        // reachable through the source chain
         let rusqlite_err = rusqlite::Error::InvalidParameterName("缺参数名".to_string());
         let hub: HubError = rusqlite_err.into();
         assert!(matches!(hub, HubError::Io(_)));

@@ -1,4 +1,5 @@
-//! Writer 层:目标工具会话写入入口。当前支持 Codex、Claude Code 与 ZCode。
+//! Writer layer: entry points for writing target-tool sessions.
+//! Currently supports Codex, Claude Code, and ZCode.
 
 pub mod claude;
 pub mod codex;

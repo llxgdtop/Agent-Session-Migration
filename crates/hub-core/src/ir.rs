@@ -1,9 +1,9 @@
-//! IR(统一中间表示)类型定义。
+//! IR (unified intermediate representation) type definitions.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 适配的三家工具。当前版本用于 `ClaudeCode`(读)与 `Codex`(写)。
+/// The three adapted tools. Currently used by `ClaudeCode` (read) and `Codex` (write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum Tool {
@@ -12,23 +12,24 @@ pub enum Tool {
     ZCode,
 }
 
-/// 消息角色。
+/// Message role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     User,
     Assistant,
 }
 
-/// 消息内内容块。当前版本以文本形式保留工具调用/结果。
+/// Content block within a message. The current version keeps tool calls/results
+/// in textual form.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnifiedPart {
-    /// 普通文本块。
+    /// Plain text block.
     Text(String),
-    /// 明文推理。
+    /// Plaintext reasoning.
     Reasoning(String),
-    /// 工具调用;`input_json` 为入参的 JSON 文本。
+    /// Tool call; `input_json` is the JSON text of the call arguments.
     ToolCall { tool: String, input_json: String },
-    /// 工具结果。
+    /// Tool result.
     ToolResult {
         tool: String,
         content: String,
@@ -36,37 +37,37 @@ pub enum UnifiedPart {
     },
 }
 
-/// 单条统一消息。
+/// A single unified message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnifiedMessage {
     pub role: Role,
     pub parts: Vec<UnifiedPart>,
-    /// 行内 timestamp(RFC3339)透传;缺失时为 None。
+    /// Inline timestamp (RFC3339) passed through; None when absent.
     pub timestamp: Option<String>,
 }
 
-/// 会话列表项。
+/// Session list entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
-    /// 源会话文件名去掉 `.jsonl`。
+    /// Source session file name without the `.jsonl` extension.
     pub session_id: String,
     pub source_path: PathBuf,
-    /// 首条 user 文本前 50 个 char;无 user 消息则为 "untitled"。
+    /// First 50 chars of the first user text; "untitled" when there is no user message.
     pub title: String,
-    /// 一律取 JSONL 行内首个非空 `cwd`。
+    /// Always the first non-empty inline `cwd` from the JSONL lines.
     pub project_dir: String,
-    /// 最后一条 user/assistant 行的 timestamp(RFC3339);缺失走文件 mtime。
+    /// Timestamp (RFC3339) of the last user/assistant line; falls back to file mtime when missing.
     pub last_active: String,
-    /// user+assistant 消息数。
+    /// Number of user+assistant messages.
     pub message_count: usize,
 }
 
-/// 完整会话 IR。
+/// Full session IR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnifiedSession {
     pub summary: SessionSummary,
     pub messages: Vec<UnifiedMessage>,
-    /// 跳过的坏行数。
+    /// Number of skipped bad lines.
     pub parse_warnings: usize,
 }
 
@@ -115,7 +116,7 @@ mod tests {
         }
     }
 
-    /// TC-IR-01:serde 序列化再反序列化,字段无丢失。
+    /// TC-IR-01: serialize with serde then deserialize; no field loss.
     #[test]
     fn tc_ir_01_serde_roundtrip_preserves_fields() {
         let original = sample_session();
@@ -124,7 +125,7 @@ mod tests {
         assert_eq!(back, original);
     }
 
-    /// TC-IR-01:Tool 枚举序列化名含 "ClaudeCode"/"Codex"/"ZCode"。
+    /// TC-IR-01: Tool enum serialization names include "ClaudeCode"/"Codex"/"ZCode".
     #[test]
     fn tc_ir_01_tool_enum_serialization_names() {
         assert_eq!(
@@ -133,7 +134,7 @@ mod tests {
         );
         assert_eq!(serde_json::to_string(&Tool::Codex).unwrap(), "\"Codex\"");
         assert_eq!(serde_json::to_string(&Tool::ZCode).unwrap(), "\"ZCode\"");
-        // 反向亦然
+        // And the reverse direction
         let tool: Tool = serde_json::from_str("\"ClaudeCode\"").unwrap();
         assert_eq!(tool, Tool::ClaudeCode);
     }
