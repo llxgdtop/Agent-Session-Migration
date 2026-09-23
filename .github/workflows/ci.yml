@@ -40,7 +40,19 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --all-targets -- -D warnings > clippy.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            # Surface the tail of the log as annotations so the failure is
+            # readable without downloading full logs.
+            tail -40 clippy.log | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line}"
+            done
+          fi
+          exit $code
 
       - name: Test
         run: cargo test --all
