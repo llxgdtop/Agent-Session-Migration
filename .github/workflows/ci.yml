@@ -48,8 +48,9 @@ jobs:
           if [ $code -ne 0 ]; then
             # Surface every error line plus the log tail as annotations so
             # the root cause is readable without downloading full logs
-            # (annotations cap at 50 per step).
-            { grep -nE "error(\[E[0-9]+\])?:" clippy.log | head -30; tail -10 clippy.log; } \
+            # (annotations cap at 50 per step). ANSI colors are stripped
+            # first: colored error lines would not match plain grep.
+            { sed "s/\x1b\[[0-9;]*m//g" clippy.log | grep -B2 -A8 -E "^error" | head -40; } \
               | while IFS= read -r line; do
                 [ -n "$line" ] && echo "::error::${line}"
               done
