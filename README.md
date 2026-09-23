@@ -33,8 +33,8 @@ Requirements: macOS 11 or later and a recent Rust toolchain. Windows and Linux b
 
 ```sh
 cargo build --release
-./scripts/build-app.sh          # produces dist/AgentSessionHub.app
-open dist/AgentSessionHub.app   # or double-click the app in Finder
+./scripts/build-app.sh          # produces dist/AgentSessionMigration.app
+open dist/AgentSessionMigration.app   # or double-click the app in Finder
 ```
 
 To migrate a session:

@@ -33,8 +33,8 @@ Agent Session Migration 把"迁移会话"变成一次点击,全程本地,不上�
 
 ```sh
 cargo build --release
-./scripts/build-app.sh          # 生成 dist/AgentSessionHub.app
-open dist/AgentSessionHub.app   # 或在 Finder 中双击打开
+./scripts/build-app.sh          # 生成 dist/AgentSessionMigration.app
+open dist/AgentSessionMigration.app   # 或在 Finder 中双击打开
 ```
 
 迁移一个会话:

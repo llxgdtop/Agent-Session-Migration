@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# A re-pushed tag should replace the in-flight run, not run alongside it.
+concurrency:
+  group: release
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -18,10 +23,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS-Intel,   os: macos-13,      artifact: AgentSessionHub-macOS-Intel.zip,   kind: app }
-          - { name: macOS-ARM,     os: macos-14,      artifact: AgentSessionHub-macOS-ARM.zip,     kind: app }
-          - { name: Linux-x86_64,  os: ubuntu-22.04,  artifact: AgentSessionHub-Linux-x86_64.tar.gz, kind: binary }
-          - { name: Windows-x86_64, os: windows-2022, artifact: AgentSessionHub-Windows-x86_64.zip, kind: binary }
+          - { name: macOS-Intel,   os: macos-13,      artifact: AgentSessionMigration-macOS-Intel.zip,   kind: app }
+          - { name: macOS-ARM,     os: macos-14,      artifact: AgentSessionMigration-macOS-ARM.zip,     kind: app }
+          - { name: Linux-x86_64,  os: ubuntu-22.04,  artifact: AgentSessionMigration-Linux-x86_64.tar.gz, kind: binary }
+          - { name: Windows-x86_64, os: windows-2022, artifact: AgentSessionMigration-Windows-x86_64.zip, kind: binary }
 
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +54,7 @@ jobs:
           import zipfile, os
           artifact = "${{ matrix.artifact }}"
           with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as z:
-              for root, dirs, files in os.walk("dist/AgentSessionHub.app"):
+              for root, dirs, files in os.walk("dist/AgentSessionMigration.app"):
                   dirs[:] = [d for d in dirs if not d.startswith(".")]
                   for f in files:
                       if f.startswith("._") or f == ".DS_Store":

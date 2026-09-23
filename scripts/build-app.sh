@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN=target/release/hub-app
-APP=dist/AgentSessionHub.app
+APP=dist/AgentSessionMigration.app
 ICON=assets/icon.icns
 
 [ -f "$BIN" ] || { echo "未找到 $BIN,请先 cargo build --release"; exit 1; }
