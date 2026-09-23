@@ -1,11 +1,11 @@
-# Agent Session Hub
+# Agent Session Migration
 
 **让你的 AI 编程会话,不再被工具锁死。**
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 <!-- TODO: 截图。截取主界面保存为 docs/screenshot.png 后取消注释:
-![Agent Session Hub 主界面](docs/screenshot.png)
+![Agent Session Migration 主界面](docs/screenshot.png)
 -->
 
 在 Claude Code 里聊到一半的工作,迁移到 Codex 或 ZCode 接着干——消息、推理过程、工具调用记录完整保留,无需从头交代背景。三个工具之间任意方向互迁。
@@ -19,7 +19,7 @@
 - **事实上的锁定**:每家工具都用私有格式把会话存在自己的目录里。你的工作史——可能最有价值的资产——散落在互不相通的存储里。
 - **无法套利**:想让贵模型做设计、便宜模型搬砖?前提是上下文能跟着活儿走。否则你只能为预算模型干得了的活付高价。
 
-Agent Session Hub 把"迁移会话"变成一次点击,全程本地,不上传任何东西。
+Agent Session Migration 把"迁移会话"变成一次点击,全程本地,不上传任何东西。
 
 ## 它能做什么
 
@@ -45,7 +45,7 @@ open dist/AgentSessionHub.app   # 或在 Finder 中双击打开
 
 ## 工作原理
 
-三家工具各有自己的会话存储格式:Claude Code 与 Codex 为 `~/.claude/projects` 和 `~/.codex/sessions` 下的 JSONL 文件,ZCode 为 `~/.zcode/` 下的一对 SQLite 数据库。Agent Session Hub 通过三段式流水线将其统一:
+三家工具各有自己的会话存储格式:Claude Code 与 Codex 为 `~/.claude/projects` 和 `~/.codex/sessions` 下的 JSONL 文件,ZCode 为 `~/.zcode/` 下的一对 SQLite 数据库。Agent Session Migration 通过三段式流水线将其统一:
 
 ```
 reader(解析源格式)--> 统一中间表示 IR --> writer(生成目标格式)

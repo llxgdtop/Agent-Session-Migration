@@ -67,7 +67,7 @@ use objc2_foundation::{NSObject, NSString};
 /// Title of the app menu (the bold entry right of the Apple menu); also
 /// used by the quit item ("Quit {APP_NAME}"). Language-neutral product
 /// name, not translated (see the i18n module docs).
-const APP_NAME: &str = "Agent Session Hub";
+const APP_NAME: &str = "Agent Session Migration";
 
 /// Set by the native "Settings…" item; polled and cleared once per frame.
 static SETTINGS_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -200,11 +200,11 @@ fn retarget_default_items(app_menu: &NSMenu, target: &AnyObject, mtm: MainThread
             continue;
         };
         match item.action() {
-            // "About <process name>" -> "About Agent Session Hub"
+            // "About <process name>" -> "About Agent Session Migration"
             Some(action) if action == sel!(orderFrontStandardAboutPanel:) => {
                 item.setTitle(&NSString::from_str(&format!("About {APP_NAME}")));
             }
-            // "Hide <process name>" -> "Hide Agent Session Hub"
+            // "Hide <process name>" -> "Hide Agent Session Migration"
             Some(action) if action == sel!(hide:) => {
                 item.setTitle(&NSString::from_str(&format!("Hide {APP_NAME}")));
             }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Agent Session Hub application icon.
+"""Generate the Agent Session Migration application icon.
 
 Design: a rounded-square gradient tile sized to the macOS guideline
 (the tile fills ~82% of the canvas so the icon does not render larger

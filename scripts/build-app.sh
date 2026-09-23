@@ -21,8 +21,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>              <string>Agent Session Hub</string>
-    <key>CFBundleDisplayName</key>       <string>Agent Session Hub</string>
+    <key>CFBundleName</key>              <string>Agent Session Migration</string>
+    <key>CFBundleDisplayName</key>       <string>Agent Session Migration</string>
     <key>CFBundleIdentifier</key>        <string>com.llxgdtop.sessionmanage</string>
     <key>CFBundleExecutable</key>        <string>hub-app</string>
     <key>CFBundleIconFile</key>          <string>icon</string>

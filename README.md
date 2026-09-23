@@ -1,14 +1,14 @@
-# Agent Session Hub
+# Agent Session Migration
 
 **Your AI coding sessions, freed from tool lock-in.**
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 <!-- TODO: screenshot. Capture the main window and save as docs/screenshot.png, then uncomment:
-![Agent Session Hub main window](docs/screenshot.png)
+![Agent Session Migration main window](docs/screenshot.png)
 -->
 
-Start a task in one AI coding tool, finish it in another. Agent Session Hub moves coding-agent sessions between Claude Code, Codex, and ZCode in any direction -- messages, reasoning, and tool-call records included -- so the next tool picks up exactly where the last one left off. No re-explaining the context from scratch.
+Start a task in one AI coding tool, finish it in another. Agent Session Migration moves coding-agent sessions between Claude Code, Codex, and ZCode in any direction -- messages, reasoning, and tool-call records included -- so the next tool picks up exactly where the last one left off. No re-explaining the context from scratch.
 
 ## Why
 
@@ -19,7 +19,7 @@ If you work with AI coding agents, you have probably hit some version of this:
 - **Lock-in by accident.** Every tool keeps sessions in its own private format under its own directory. Your work history -- arguably your most valuable asset -- is scattered across stores that don't talk to each other.
 - **No model arbitrage.** Want the strong model to design and the cheap one to grind through the CRUD? That only works if context can follow the work across tools. Otherwise you're paying premium prices for tasks a budget model would handle fine.
 
-Agent Session Hub turns "migrate a session" into one click, locally, without uploading anything.
+Agent Session Migration turns "migrate a session" into one click, locally, without uploading anything.
 
 ## What it does
 
@@ -45,7 +45,7 @@ To migrate a session:
 
 ## How it works
 
-Each tool stores sessions in its own format: JSONL files under `~/.claude/projects` and `~/.codex/sessions`, and a pair of SQLite databases under `~/.zcode/`. Agent Session Hub normalizes them through a three-stage pipeline:
+Each tool stores sessions in its own format: JSONL files under `~/.claude/projects` and `~/.codex/sessions`, and a pair of SQLite databases under `~/.zcode/`. Agent Session Migration normalizes them through a three-stage pipeline:
 
 ```
 reader (parse source format) --> unified IR --> writer (emit target format)

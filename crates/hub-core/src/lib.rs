@@ -1,4 +1,4 @@
-//! Agent Session Hub core library (hub-core).
+//! Agent Session Migration core library (hub-core).
 //!
 //! Three-layer data flow: reader (source parsing) → IR (unified intermediate
 //! representation) → mapper/writer (target generation).

@@ -1,4 +1,4 @@
-//! Agent Session Hub desktop app.
+//! Agent Session Migration desktop app.
 //!
 //! Layout: on Windows/Linux a slim top menu bar (app menu with
 //! "Settings…" and a direct language switch); on macOS the same app menu
@@ -85,12 +85,12 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1160.0, 760.0])
-            .with_title("Agent Session Hub")
+            .with_title("Agent Session Migration")
             .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
-        "Agent Session Hub",
+        "Agent Session Migration",
         options,
         Box::new(|cc| {
             // Native menu bar (macOS only): winit has initialized
@@ -530,7 +530,7 @@ impl eframe::App for HubApp {
 impl HubApp {
     // ---------- Top: menu bar (Windows/Linux; macOS uses the native one) ----------
 
-    /// In-window app menu: one "Agent Session Hub" menu holding
+    /// In-window app menu: one "Agent Session Migration" menu holding
     /// "Settings…" (opens the popup window) and a direct language switch,
     /// so the language is reachable without opening Settings.
     ///
@@ -541,7 +541,7 @@ impl HubApp {
     fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
         let t = self.lang.resolved().strings();
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("Agent Session Hub", |ui| {
+            ui.menu_button("Agent Session Migration", |ui| {
                 if ui.button(t.settings_menu).clicked() {
                     self.show_settings = true;
                     ui.close();
@@ -589,7 +589,7 @@ impl HubApp {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(t.about_section).strong());
                 ui.label(format!(
-                    "Agent Session Hub · {} {}",
+                    "Agent Session Migration · {} {}",
                     t.version_label,
                     env!("CARGO_PKG_VERSION")
                 ));

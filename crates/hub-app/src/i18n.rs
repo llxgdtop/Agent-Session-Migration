@@ -11,7 +11,7 @@
 //!   Claude/ZCode flattens tool calls into exactly these strings (asserted
 //!   by hub-core e2e tests), so the preview must keep matching the artifact
 //!   text in every UI language. Only the role names are localized.
-//! - Brand and technical names ("Agent Session Hub", "Claude", "Codex",
+//! - Brand and technical names ("Agent Session Migration", "Claude", "Codex",
 //!   "ZCode") are language-neutral and stay inline in `main.rs`.
 
 use std::path::{Path, PathBuf};
