@@ -1,34 +1,21 @@
 #!/usr/bin/env python3
-"""Generate the Agent Session Hub icon assets (pure Python 3 stdlib).
+"""Generate the Agent Session Hub application icon.
 
-Outputs (into <repo>/assets, created if missing):
-  icon-1024.png  master icon, RGBA PNG with straight alpha
-  icon-256.rgba  256x256 raw RGBA bytes (straight alpha), embedded into the
-                 eframe/egui window icon via include_bytes!
-  icon.icns      macOS icon resource (only when sips + iconutil are
-                 available; skipped silently elsewhere)
+Design: a rounded-square gradient tile sized to the macOS guideline
+(the tile fills ~82% of the canvas so the icon does not render larger
+than neighboring icons in the Dock) with a white two-arrow swap glyph:
+two horizontal round-capped strokes with solid arrowheads pointing
+right (top) and left (bottom), rotationally symmetric about the center.
 
-Design: a rounded-square background (corner radius 22.5% of the side)
-with a vertical gradient from deep indigo #3B5BDB (top) to deep
-blue-purple #2B3A8F (bottom), and a centered white glyph: two opposing
-arc arrows chasing each other around a ring (the session-interchange
-metaphor). Each arc spans 120 degrees; the two 60-degree gaps sit on the
-left/right horizontal axis, and an arrowhead triangle at each leading
-end points along the direction of travel.
+Everything is pure-stdlib Python (math/zlib/struct/array) and
+deterministic: repeated runs produce byte-identical outputs.
 
-Rendering: analytic coverage rasterization on a 4x supersampled canvas
-(4096x4096 for the 1024 master) -- every sample is classified
-exactly (inside/outside per shape, no approximation) -- followed by a
-box filter down to the output size. The 256 icon is derived from the
-same supersampled sums with a 16x box filter. Output uses straight
-(non-premultiplied) alpha, which is what both PNG and egui::IconData
-expect.
+Outputs (relative to the repo root):
+  assets/icon-1024.png   master artwork (RGBA PNG)
+  assets/icon-256.rgba   raw straight-alpha RGBA for the eframe window icon
+  assets/icon.icns       macOS iconset bundle (needs sips + iconutil)
 
-Determinism: no randomness and no timestamps; all arithmetic runs in a
-fixed evaluation order, so repeated runs on the same interpreter
-produce byte-identical files.
-
-Usage: python3 scripts/gen_icon.py   (works from any cwd)
+Usage: python3 scripts/gen_icon.py   (any cwd; ~15-25 s)
 """
 
 import math
@@ -41,24 +28,32 @@ import tempfile
 import zlib
 from array import array
 
-# ---------------------------------------------------------------------------
-# Design constants (unit-square coordinates: x right, y down, side = 1.0)
-# ---------------------------------------------------------------------------
-
-MASTER = 1024            # master PNG size
-WINDOW = 256             # egui window-icon size
-SS = 4                   # supersampling factor per axis (4096 canvas)
+MASTER = 1024             # master output size
+WINDOW = 256              # window-icon output size
+SS = 4                    # supersampling factor per axis (4096 canvas)
 
 GRAD_TOP = (0x3B, 0x5B, 0xDB)  # deep indigo, top of the gradient
-GRAD_BOT = (0x2B, 0x3A, 0x8F)  # deep blue-purple, bottom of the gradient
+GRAD_BOT = (0x2F, 0x40, 0x9E)  # deep blue-purple, bottom of the gradient
 
-CORNER = 0.225           # rounded-square corner radius (fraction of side)
-RING_R = 0.245           # ring mid radius (center line of the stroke)
-RING_HALF = 0.040        # ring stroke half width (stroke = 8% of side)
-ARC_SPAN = math.radians(60.0)  # half span of each arc (full span 120 deg)
-ARC_CENTERS = (math.radians(270.0), math.radians(90.0))  # top, bottom arc
-HEAD_LEN = 0.115         # arrowhead length along the travel direction
-HEAD_HALF = 0.060        # arrowhead half width (1.5x stroke half width)
+# --- Background tile: rounded square occupying 82% of the canvas ---------
+BG_INSET = 0.09           # transparent margin on every side
+BG_CORNER = 0.185         # corner radius (fraction of the full side)
+
+# --- Swap glyph (fractions of the full side, center = 0.5) ---------------
+# Two rotationally symmetric arrows. Each is a round-capped horizontal
+# stroke plus a triangular head at its leading end.
+STROKE_HW = 0.046         # stroke half width
+ARROW_TOP_Y = 0.385       # center line of the right-pointing arrow
+ARROW_BOT_Y = 0.615       # center line of the left-pointing arrow
+# Top arrow (points right): round-capped tail at 0.315, head tip 0.725.
+# Bottom arrow (points left) mirrors it through the canvas center.
+TOP_TAIL_X = 0.300
+TOP_TIP_X = 0.740
+HEAD_BASE_BACK = 0.105    # head base sits this far behind the tip
+HEAD_HW = 0.075           # arrowhead half width
+
+# Derived glyph bounding box (with a small safety pad for the round caps).
+GLYPH_BBOX = (0.24, 0.32, 0.76, 0.68)
 
 
 # ---------------------------------------------------------------------------
@@ -66,56 +61,52 @@ HEAD_HALF = 0.060        # arrowhead half width (1.5x stroke half width)
 # ---------------------------------------------------------------------------
 
 def build_glyph(scale):
-    """Precompute glyph rasterization primitives at `scale` subpixels.
+    """Precompute glyph primitives at `scale` subpixels.
 
-    Returns (r1sq, r2sq, arcs, heads):
-      r1sq/r2sq -- squared inner/outer ring radii
-      arcs      -- per arc two wedge half-planes (nx, ny) keeping samples
-                   with nx*dx + ny*dy <= 0 (exact for spans < 180 deg)
-      heads     -- per arrowhead three edge functions (A, B, C) that are
-                   >= 0 inside the triangle, plus a bounding box
+    Returns (strokes, heads):
+      strokes -- list of (y, x0, x1, hw2): a point is inside the stroke
+                 when its squared distance to the segment (with round
+                 caps) is <= hw2. Horizontal segments make this cheap.
+      heads   -- per arrowhead three edge functions (A, B, C) that are
+                 >= 0 inside the triangle.
     """
-    r1 = (RING_R - RING_HALF) * scale
-    r2 = (RING_R + RING_HALF) * scale
-    arcs = []
+    # (axis_y, tail_x, tip_x) in unit fractions; the head points toward
+    # the tip, the round cap sits on the tail. Bottom mirrors top through
+    # the canvas center (rotationally symmetric swap motif).
+    arrows = (
+        (ARROW_TOP_Y, TOP_TAIL_X, TOP_TIP_X),
+        (ARROW_BOT_Y, 1.0 - TOP_TAIL_X, 1.0 - TOP_TIP_X),
+    )
+
+    strokes = []
     heads = []
-    for tc in ARC_CENTERS:
-        te = tc + ARC_SPAN  # leading end (arrowhead sits here)
-        planes = tuple(
-            (math.cos(a), math.sin(a))
-            for a in (te + math.pi / 2.0, tc - ARC_SPAN - math.pi / 2.0)
-        )
-        arcs.append(planes)
-        # Arrowhead: base centered on the arc end, tip along the tangent
-        # (direction of travel), width across the tangent.
-        cx = cy = 0.5 * scale
-        px = cx + (RING_R * scale) * math.cos(te)
-        py = cy + (RING_R * scale) * math.sin(te)
-        tx, ty = -math.sin(te), math.cos(te)
-        nx, ny = -ty, tx
+    for (ay_frac, tail_frac, tip_frac) in arrows:
+        ay = ay_frac * scale
+        direction = 1.0 if tip_frac > tail_frac else -1.0
+        base_frac = tip_frac - direction * HEAD_BASE_BACK
+        x0, x1 = sorted((tail_frac * scale, base_frac * scale))
+        strokes.append((ay, x0, x1, (STROKE_HW * scale) ** 2))
+
+        tip = tip_frac * scale
+        base = base_frac * scale
+        hw = HEAD_HW * scale
         verts = (
-            (px + tx * HEAD_LEN * scale, py + ty * HEAD_LEN * scale),
-            (px + nx * HEAD_HALF * scale, py + ny * HEAD_HALF * scale),
-            (px - nx * HEAD_HALF * scale, py - ny * HEAD_HALF * scale),
+            (tip, ay),
+            (base, ay - hw),
+            (base, ay + hw),
         )
         edges = []
         gx = sum(v[0] for v in verts) / 3.0
         gy = sum(v[1] for v in verts) / 3.0
         for k in range(3):
-            x0, y0 = verts[k]
-            x1, y1 = verts[(k + 1) % 3]
-            a, b, c = y0 - y1, x1 - x0, x0 * y1 - x1 * y0
+            xa, ya = verts[k]
+            xb, yb = verts[(k + 1) % 3]
+            a, b, c = ya - yb, xb - xa, xa * yb - xb * ya
             if a * gx + b * gy + c < 0.0:
                 a, b, c = -a, -b, -c
             edges.append((a, b, c))
-        box = (
-            min(v[0] for v in verts) - 1.0,
-            max(v[0] for v in verts) + 1.0,
-            min(v[1] for v in verts) - 1.0,
-            max(v[1] for v in verts) + 1.0,
-        )
-        heads.append((edges, box))
-    return r1 * r1, r2 * r2, arcs, heads
+        heads.append(edges)
+    return strokes, heads
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +123,14 @@ def render(size, ss):
     canvas = size * ss
     n = ss * ss  # samples per output pixel
     c = 0.5 * canvas
-    half = 0.5 * canvas
-    corner = CORNER * canvas
+    # Background tile geometry (82% of the canvas, centered).
+    half = 0.5 * canvas * (1.0 - 2.0 * BG_INSET)
+    corner = BG_CORNER * canvas
     inner = half - corner  # inner (straight-edge) rect half extent
-    r1sq, r2sq, arcs, heads = build_glyph(canvas)
-    ring_outer = math.sqrt(r2sq)
+
+    strokes, heads = build_glyph(canvas)
+    bx0, by0, bx1, by1 = (GLYPH_BBOX[0] * canvas, GLYPH_BBOX[1] * canvas,
+                          GLYPH_BBOX[2] * canvas, GLYPH_BBOX[3] * canvas)
 
     acc = array("H", [0]) * (size * size * 4)
     shift = ss.bit_length() - 1  # log2(ss): subpixel -> output pixel
@@ -174,51 +168,31 @@ def render(size, ss):
             acc[j + 2] += gb
             acc[j + 3] += 1
 
-        # --- Pass 2: glyph inside its row envelope ---------------------
-        dy2 = dy * dy
-        gxl = gxr = None
-        if dy2 <= r2sq:
-            xr = math.sqrt(r2sq - dy2)
-            gxl, gxr = -xr, xr
-        active_heads = []
-        for head in heads:
-            box = head[1]
-            if box[2] <= y <= box[3]:
-                active_heads.append(head)
-                if gxl is None or box[0] - c < gxl:
-                    gxl = box[0] - c
-                if gxr is None or box[1] - c > gxr:
-                    gxr = box[1] - c
-        if gxl is None:
+        # --- Pass 2: glyph rows only -----------------------------------
+        if not (by0 <= y <= by1):
             continue
-        # Per-row wedge constants: nx*dx <= -ny*dy
-        row_arcs = [
-            ((p[0][0], p[1][0]), (-p[0][1] * dy, -p[1][1] * dy)) for p in arcs
-        ]
-        row_edges = [
-            (e[0][0], e[1][0], e[2][0],
-             e[0][1] * y + e[0][2], e[1][1] * y + e[1][2], e[2][1] * y + e[2][2])
-            for (e, _box) in active_heads
-        ]
-        glo = max(0, int(math.ceil(c + gxl - 0.5)))
-        ghi = min(canvas - 1, int(math.floor(c + gxr - 0.5)))
+        glo = max(lo, int(math.ceil(bx0 - 0.5)))
+        ghi = min(hi, int(math.floor(bx1 - 0.5)))
+        # Pre-select strokes touching this row; heads stay unfiltered
+        # (the edge test itself is cheap and triangles span few rows).
+        row_strokes = [s for s in strokes
+                       if abs(y - s[0]) <= STROKE_HW * canvas + 1.0]
         for sx in range(glo, ghi + 1):
             x = sx + 0.5
-            dx = x - c
             hit = False
-            d2 = dx * dx + dy2
-            if r1sq <= d2 <= r2sq:
-                for (nx1, nx2), (k1, k2) in row_arcs:
-                    if nx1 * dx <= k1 and nx2 * dx <= k2:
-                        hit = True
-                        break
+            for (ay, x0, x1, hw2) in row_strokes:
+                dx = x - x0 if x < x0 else (x - x1 if x > x1 else 0.0)
+                ddy = y - ay
+                if dx * dx + ddy * ddy <= hw2:
+                    hit = True
+                    break
             if not hit:
-                for e in row_edges:
-                    if (
-                        e[0] * x + e[3] >= 0.0
-                        and e[1] * x + e[4] >= 0.0
-                        and e[2] * x + e[5] >= 0.0
-                    ):
+                for edges in heads:
+                    if (edges[0][0] * x + edges[0][1] * y + edges[0][2] >= 0.0
+                            and edges[1][0] * x + edges[1][1] * y
+                            + edges[1][2] >= 0.0
+                            and edges[2][0] * x + edges[2][1] * y
+                            + edges[2][2] >= 0.0):
                         hit = True
                         break
             if hit:
