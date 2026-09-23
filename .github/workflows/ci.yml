@@ -28,6 +28,11 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        # ubuntu-22.04 kept failing with E0463 (missing eframe rlib) while
+        # the same code passes a clean local 22.04 container run -- a stale
+        # or corrupted restored cache is the prime suspect, so this runner
+        # builds cache-free until proven otherwise.
+        if: matrix.os != 'ubuntu-22.04'
 
       # eframe (X11/Wayland) link dependencies, Linux only.
       - name: Install GUI dependencies (Linux)
