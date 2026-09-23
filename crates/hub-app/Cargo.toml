@@ -9,3 +9,21 @@ egui.workspace = true
 eframe.workspace = true
 # Already a workspace dependency (via hub-core); used for settings.json.
 serde_json.workspace = true
+
+# Native macOS menu bar (src/native_menu.rs). The versions deliberately
+# match what eframe/glutin/arboard already pull in transitively (the same
+# Cargo.lock entries), so no second copy of the objc2 stack is built.
+# objc2-foundation supplies the NSString/NSObject types every AppKit call
+# takes; it is already in the graph via objc2-app-kit.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "NSApplication",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSObject",
+    "NSString",
+] }

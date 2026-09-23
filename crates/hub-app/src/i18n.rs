@@ -139,7 +139,10 @@ pub struct Strings {
     pub run_warning_zcode_extra: &'static str,
 
     // ---- Menu bar / settings ----
-    /// App-menu entry that opens the settings window.
+    /// App-menu entry that opens the settings window. Only the in-window
+    /// menu bar (Windows/Linux) reads it: on macOS the native menu uses
+    /// a fixed English title (see `native_menu`).
+    #[cfg(not(target_os = "macos"))]
     pub settings_menu: &'static str,
     /// Settings window title.
     pub settings_title: &'static str,
@@ -189,6 +192,7 @@ impl Strings {
             role_user: "用户",
             role_assistant: "助手",
             run_warning_zcode_extra: "ZCode 运行中写入有数据损坏风险,强烈建议先退出。",
+            #[cfg(not(target_os = "macos"))]
             settings_menu: "设置…",
             settings_title: "设置",
             language_section: "语言",
@@ -226,6 +230,7 @@ impl Strings {
             role_assistant: "Assistant",
             run_warning_zcode_extra: " Writing while ZCode is running risks data \
             corruption; quitting it first is strongly recommended.",
+            #[cfg(not(target_os = "macos"))]
             settings_menu: "Settings…",
             settings_title: "Settings",
             language_section: "Language",
@@ -486,7 +491,9 @@ mod tests {
     fn all_labels_present_in_both_languages() {
         for lang in [ResolvedLang::Chinese, ResolvedLang::English] {
             let t = lang.strings();
-            let labels = [
+            // A vec (not an array) so the macOS-only field can be omitted
+            // with a cfg attribute below.
+            let mut labels = vec![
                 t.all_sessions,
                 t.rescan,
                 t.search_hint,
@@ -506,7 +513,12 @@ mod tests {
                 t.role_user,
                 t.role_assistant,
                 t.run_warning_zcode_extra,
-                t.settings_menu,
+            ];
+            // Compiled out on macOS together with the field (the native
+            // menu uses a fixed English title there).
+            #[cfg(not(target_os = "macos"))]
+            labels.push(t.settings_menu);
+            labels.extend([
                 t.settings_title,
                 t.language_section,
                 t.language_system,
@@ -517,7 +529,7 @@ mod tests {
                 t.app_description,
                 t.settings_file_label,
                 t.close,
-            ];
+            ]);
             assert!(
                 labels.iter().all(|label| !label.is_empty()),
                 "empty label in {lang:?}"

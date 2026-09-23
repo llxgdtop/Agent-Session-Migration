@@ -1,7 +1,10 @@
 //! Agent Session Hub desktop app.
 //!
-//! Layout: a slim top menu bar (app menu with "Settings…" and a direct
-//! language switch), a left sidebar with the unified session list (sessions
+//! Layout: on Windows/Linux a slim top menu bar (app menu with
+//! "Settings…" and a direct language switch); on macOS the same app menu
+//! lives in the native system menu bar next to the Apple menu instead
+//! (see [`native_menu`]) and the in-window bar is not drawn. Below it, a
+//! left sidebar with the unified session list (sessions
 //! from Claude Code / Codex / ZCode are scanned automatically on a
 //! background thread — first at startup, then every 30 seconds — merged
 //! and sorted by recent activity, each card carries a source badge, and
@@ -18,6 +21,9 @@
 //! preview prefixes). Code comments are English per project convention.
 
 mod i18n;
+// macOS-only: the native system menu bar (Settings…/Quit bridging).
+#[cfg(target_os = "macos")]
+mod native_menu;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -87,6 +93,12 @@ fn main() -> eframe::Result<()> {
         "Agent Session Hub",
         options,
         Box::new(|cc| {
+            // Native menu bar (macOS only): winit has initialized
+            // NSApplication (and its default menu) by the time this
+            // creation callback runs, so the menu can be wired up right
+            // away.
+            #[cfg(target_os = "macos")]
+            native_menu::install(&cc.egui_ctx);
             install_cjk_fonts(&cc.egui_ctx);
             Ok(Box::new(HubApp::new(&cc.egui_ctx)))
         }),
@@ -471,7 +483,26 @@ impl eframe::App for HubApp {
         self.pump_scan_channel();
         self.maybe_auto_rescan(ui.ctx());
 
-        // Slim top menu bar (~20px): app menu with Settings + language switch.
+        // Native menu requests (macOS): a menu action flipped an atomic
+        // flag and asked for this repaint; apply the effect and clear
+        // the flag through the normal egui code path.
+        #[cfg(target_os = "macos")]
+        if native_menu::take_settings_requested() {
+            self.show_settings = true;
+        }
+        #[cfg(target_os = "macos")]
+        if native_menu::take_exit_requested() {
+            // Close via the viewport command so the app shuts down
+            // through eframe's regular teardown (not NSApplication
+            // terminate, which would skip egui cleanup).
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
+        // Slim top menu bar (~20px): app menu with Settings + language
+        // switch. Not drawn on macOS — the same entries live in the
+        // native system menu bar (see [`native_menu`]) so the menu only
+        // exists in one place.
+        #[cfg(not(target_os = "macos"))]
         egui::Panel::top("menu_bar")
             .frame(
                 egui::Frame::new()
@@ -497,11 +528,16 @@ impl eframe::App for HubApp {
 }
 
 impl HubApp {
-    // ---------- Top: menu bar ----------
+    // ---------- Top: menu bar (Windows/Linux; macOS uses the native one) ----------
 
-    /// macOS-style app menu: one "Agent Session Hub" menu holding
+    /// In-window app menu: one "Agent Session Hub" menu holding
     /// "Settings…" (opens the popup window) and a direct language switch,
     /// so the language is reachable without opening Settings.
+    ///
+    /// macOS compiles this out: the app menu is the native system menu
+    /// bar there (see [`crate::native_menu`]), and language switching
+    /// lives in the shared Settings popup.
+    #[cfg(not(target_os = "macos"))]
     fn show_menu_bar(&mut self, ui: &mut egui::Ui) {
         let t = self.lang.resolved().strings();
         egui::MenuBar::new().ui(ui, |ui| {
