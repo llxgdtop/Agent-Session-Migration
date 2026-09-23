@@ -1,0 +1,87 @@
+# Release: build and publish per-platform artifacts when a version tag
+# is pushed (git tag v0.1.0 && git push origin v0.1.0).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS-Intel,   os: macos-13,      artifact: AgentSessionHub-macOS-Intel.zip,   kind: app }
+          - { name: macOS-ARM,     os: macos-14,      artifact: AgentSessionHub-macOS-ARM.zip,     kind: app }
+          - { name: Linux-x86_64,  os: ubuntu-22.04,  artifact: AgentSessionHub-Linux-x86_64.tar.gz, kind: binary }
+          - { name: Windows-x86_64, os: windows-2022, artifact: AgentSessionHub-Windows-x86_64.zip, kind: binary }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # eframe (X11/Wayland) link dependencies, Linux only.
+      - name: Install GUI dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev
+
+      - name: Build (release)
+        run: cargo build --release
+
+      # Package without OS metadata junk (AppleDouble files, extended
+      # attributes) using a small python script on every platform.
+      - name: Package (macOS app bundle)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ./scripts/build-app.sh
+          python3 - <<'EOF'
+          import zipfile, os
+          artifact = "${{ matrix.artifact }}"
+          with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as z:
+              for root, dirs, files in os.walk("dist/AgentSessionHub.app"):
+                  dirs[:] = [d for d in dirs if not d.startswith(".")]
+                  for f in files:
+                      if f.startswith("._") or f == ".DS_Store":
+                          continue
+                      p = os.path.join(root, f)
+                      z.write(p, os.path.relpath(p, "dist"))
+          print("packaged", artifact)
+          EOF
+
+      - name: Package (Linux tarball)
+        if: runner.os == 'Linux'
+        run: |
+          python3 - <<'EOF'
+          import tarfile, os
+          artifact = "${{ matrix.artifact }}"
+          with tarfile.open(artifact, "w:gz") as t:
+              t.add("target/release/hub-app", arcname="agent-session-hub")
+          print("packaged", artifact)
+          EOF
+
+      - name: Package (Windows zip)
+        if: runner.os == 'Windows'
+        shell: python
+        run: |
+          import zipfile
+          artifact = "${{ matrix.artifact }}"
+          with zipfile.ZipFile(artifact, "w", zipfile.ZIP_DEFLATED) as z:
+              z.write(r"target\release\hub-app.exe", arcname="AgentSessionHub.exe")
+          print("packaged", artifact)
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}
+          generate_release_notes: true
