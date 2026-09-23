@@ -54,13 +54,15 @@ fn tc_e2e_01_golden_compare_and_source_untouched() {
     let tmp = tempfile::tempdir().unwrap();
     let out = write_session_with(&ir, tmp.path(), &FixedIdGen).unwrap();
 
-    // Artifact path shape: <root>/<DATE>/rollout-<ts>-<uuid>.jsonl
+    // Artifact path shape: <root>/<DATE>/rollout-<ts>-<uuid>.jsonl.
+    // Path separators are normalized to '/' so the assertion holds on
+    // Windows too (Path::display keeps the native '\').
     let rel = out
         .file_path
         .strip_prefix(tmp.path())
         .unwrap()
         .to_string_lossy()
-        .to_string();
+        .replace(std::path::MAIN_SEPARATOR, "/");
     assert_eq!(
         normalize_path_prefix(&rel),
         format!("<DATE>/rollout-{FIXED_TS_FILE}-{FIXED_UUID}.jsonl")
