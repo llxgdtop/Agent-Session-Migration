@@ -10,6 +10,17 @@
 
 Start a task in one AI coding tool, finish it in another. Agent Session Hub moves coding-agent sessions between Claude Code, Codex, and ZCode in any direction -- messages, reasoning, and tool-call records included -- so the next tool picks up exactly where the last one left off. No re-explaining the context from scratch.
 
+## Why
+
+If you work with AI coding agents, you have probably hit some version of this:
+
+- **The quota wall.** Your Claude subscription runs dry mid-task. The work isn't done, the context lives in that tool, and your only options are to wait -- or start over somewhere else and re-explain everything.
+- **The handoff tax.** "Just ask the old agent to write a handoff summary" works only while it still answers -- and only as well as its already-compacted memory. Long sessions get summarized into summaries; the reasoning behind earlier decisions is gone.
+- **Lock-in by accident.** Every tool keeps sessions in its own private format under its own directory. Your work history -- arguably your most valuable asset -- is scattered across stores that don't talk to each other.
+- **No model arbitrage.** Want the strong model to design and the cheap one to grind through the CRUD? That only works if context can follow the work across tools. Otherwise you're paying premium prices for tasks a budget model would handle fine.
+
+Agent Session Hub turns "migrate a session" into one click, locally, without uploading anything.
+
 ## What it does
 
 - **Session overview** -- Scans all Claude Code, Codex, and ZCode sessions on your machine into a single list, sorted by recent activity, with source badges plus per-source filters and search. Click any session to preview the full message stream.
