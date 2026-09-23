@@ -46,11 +46,13 @@ jobs:
           cargo clippy --all-targets -- -D warnings > clippy.log 2>&1
           code=$?
           if [ $code -ne 0 ]; then
-            # Surface the tail of the log as annotations so the failure is
-            # readable without downloading full logs.
-            tail -40 clippy.log | while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error::${line}"
-            done
+            # Surface every error line plus the log tail as annotations so
+            # the root cause is readable without downloading full logs
+            # (annotations cap at 50 per step).
+            { grep -nE "error(\[E[0-9]+\])?:" clippy.log | head -30; tail -10 clippy.log; } \
+              | while IFS= read -r line; do
+                [ -n "$line" ] && echo "::error::${line}"
+              done
           fi
           exit $code
 
