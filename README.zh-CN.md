@@ -75,4 +75,4 @@ cargo clippy --all-targets  # 静态检查
 
 ## 许可
 
-TBD,尚未选定。
+Apache-2.0,详见 [LICENSE](LICENSE)。

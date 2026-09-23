@@ -75,4 +75,4 @@ Conversion logic lives in `crates/hub-core`; the UI lives in `crates/hub-app`.
 
 ## License
 
-TBD. A license has not been chosen yet.
+Apache-2.0. See [LICENSE](LICENSE).
