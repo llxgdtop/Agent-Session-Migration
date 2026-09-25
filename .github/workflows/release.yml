@@ -23,10 +23,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS-Intel,   os: macos-13,      artifact: AgentSessionMigration-macOS-Intel.zip,   kind: app }
-          - { name: macOS-ARM,     os: macos-14,      artifact: AgentSessionMigration-macOS-ARM.zip,     kind: app }
-          - { name: Linux-x86_64,  os: ubuntu-22.04,  artifact: AgentSessionMigration-Linux-x86_64.tar.gz, kind: binary }
-          - { name: Windows-x86_64, os: windows-2022, artifact: AgentSessionMigration-Windows-x86_64.zip, kind: binary }
+          - { name: macOS-Intel,   os: macos-14,      artifact: AgentSessionMigration-macOS-Intel.zip,   kind: app, target: x86_64-apple-darwin }
+          - { name: macOS-ARM,     os: macos-14,      artifact: AgentSessionMigration-macOS-ARM.zip,     kind: app, target: aarch64-apple-darwin }
+          - { name: Linux-x86_64,  os: ubuntu-22.04,  artifact: AgentSessionMigration-Linux-x86_64.tar.gz, kind: binary, target: '' }
+          - { name: Windows-x86_64, os: windows-2022, artifact: AgentSessionMigration-Windows-x86_64.zip, kind: binary, target: '' }
 
     steps:
       - uses: actions/checkout@v4
@@ -40,8 +40,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxinerama-dev libgl1-mesa-dev libwayland-dev libxkbcommon-dev
 
+      - name: Install cross-compile target (macOS Intel on ARM runner)
+        if: runner.os == 'macOS' && matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       # Package without OS metadata junk (AppleDouble files, extended
       # attributes) using a small python script on every platform.
@@ -49,6 +53,10 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          BIN_PATH=target/${{ matrix.target }}/release/hub-app
+          [ -f "$BIN_PATH" ] || BIN_PATH=target/release/hub-app
+          mkdir -p target/release
+          cp -f "$BIN_PATH" target/release/hub-app
           ./scripts/build-app.sh
           python3 - <<'EOF'
           import zipfile, os

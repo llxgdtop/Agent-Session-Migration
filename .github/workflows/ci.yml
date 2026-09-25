@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-24.04, windows-2022, macos-13, macos-14]
+        os: [ubuntu-22.04, ubuntu-24.04, windows-2022, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -64,3 +64,11 @@ jobs:
 
       - name: Test
         run: cargo test --all
+
+      # Intel macOS runner is being retired; keep x86_64-apple-darwin
+      # compiling on the ARM runner instead (check only, tests run natively).
+      - name: Cross-check Intel macOS
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add x86_64-apple-darwin
+          cargo check --all-targets --target x86_64-apple-darwin
